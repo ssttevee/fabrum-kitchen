@@ -159,8 +159,15 @@ test "disabling the page disables every widget" {
 
 const HybridHarness = app.testing.Harness(.{}, Hybrid);
 
+/// The hybrid screen with native widgets, in the fake native tree, however
+/// fabrum is built.
 fn hybrid() !HybridHarness {
-    return .init(.{}, .{ .viewport = window_size });
+    return .init(.{}, .{ .viewport = window_size, .widgets = .native });
+}
+
+/// The hybrid screen with its widgets drawn, as on the `none` platform.
+fn drawnHybrid() !HybridHarness {
+    return .init(.{}, .{ .viewport = window_size, .widgets = .drawn });
 }
 
 test "the hybrid screen shows native controls around drawn content" {
@@ -177,7 +184,7 @@ test "the hybrid screen shows native controls around drawn content" {
     // the progress bar is native, at the model's 0.3
     try testing.expectEqual(@as(?f64, 0.3), (try h.expectWidget(r.native("progress"))).spec.progress.value);
     // fabrum laid out the native views inside the window
-    for (h.platform.all()) |w| if (w.frame) |frame| {
+    for (h.tree.all()) |w| if (w.frame) |frame| {
         try testing.expect(frame.x >= 0 and frame.x + frame.w <= window_size.x);
         try testing.expect(frame.y >= 0 and frame.y + frame.h <= window_size.y);
     };
@@ -302,4 +309,54 @@ test "Say Hello shows a native alert whose answer comes back as a message" {
     try testing.expectEqual(@as(?usize, 1), h.state().answer);
     try testing.expect(h.widget(r.native("hello")) == null);
     try h.expectText("3 of 5; greeted 1 times, last answer 1");
+}
+
+// The hybrid screen with drawn widgets, as the `none` platform shows it
+
+test "without native controls, the hybrid screen draws them, and they drive the model" {
+    var h = try drawnHybrid();
+    defer h.deinit();
+    try h.frame();
+    const r = h.root();
+    // nothing native, not even the menu
+    try testing.expectEqual(@as(usize, 0), h.tree.all().len);
+    try h.expectText("Click me!");
+
+    try h.click("Click me!");
+    try h.expectText("Blue");
+    try h.clickElement(r.element("transform"));
+    try testing.expect(h.state().transform);
+    try h.clickElement(r.element("switch"));
+    try testing.expect(h.state().switched);
+    try h.expectText("enabled");
+
+    // the slider jumps to where it is clicked, and the progress bar follows
+    const slider = h.findElement(r.child(app.drawn.Slider, "slider").element("slider")).?.bbox;
+    try h.clickAt(.init(slider.x + 8 + (slider.w - 16) * 0.75, slider.y + slider.h / 2));
+    try h.expectText("0.75");
+    try testing.expectApproxEqAbs(@as(f64, 0.75), h.state().progress, 0.001);
+}
+
+test "a drawn line editor takes focus when clicked, and Tab goes on to the radio buttons" {
+    var h = try drawnHybrid();
+    defer h.deinit();
+    try h.frame();
+    const r = h.root();
+
+    try h.clickElement(r.element("line"));
+    try h.expectFocused(r.element("line"));
+    try testing.expect(try h.pressKey(.tab, .{}));
+    try h.expectFocused(r.element(Hybrid.Choice.r1));
+    try testing.expect(try h.pressKey(.space, .{}));
+    try testing.expectEqual(Hybrid.Choice.r1, h.state().choice.?);
+}
+
+test "an overlay without the page lets clicks between widgets through" {
+    var h: HybridHarness = try .init(.{ .page = false }, .{ .viewport = window_size, .widgets = .drawn });
+    defer h.deinit();
+    try h.frame();
+    // right of the heading: nothing of the app's
+    const heading = h.findText("Hello, fabrum").?.bbox;
+    try testing.expect(!try h.mouse(.{ .position = .init(window_size.x - 10, heading.y + heading.h / 2) }));
+    try testing.expect(try h.mouse(.{ .position = app.testing.center(h.findText("Click me!").?) }));
 }

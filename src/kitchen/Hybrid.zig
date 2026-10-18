@@ -14,6 +14,9 @@
 //! - The menu bar has Kitchen > Say Hello (Cmd-K), which shows a native
 //!   alert; its answer comes back as a message.
 //!
+//! On a platform without native controls, such as `none`, `app.widgets`
+//! draws them, and the same screen is entirely drawn (`kitchen-none`).
+//!
 //! `Kitchen.zig` is the same screen drawn entirely by fabrum, for
 //! comparison (`kitchen --drawn`).
 const std = @import("std");
@@ -79,7 +82,12 @@ pub const Msg = union(enum) {
     answered: usize,
 };
 
-pub const Props = struct {};
+pub const Props = struct {
+    /// Whether the page has the window's background. An overlay leaves it
+    /// out, so what is under it shows between the widgets, and clicks
+    /// there go through to it.
+    page: bool = true,
+};
 
 pub fn update(state: *State, msg: Msg, ctx: *app.Update(Hybrid)) void {
     const gpa = ctx.gpa;
@@ -132,13 +140,13 @@ fn upper(text: []u8) void {
     for (text) |*c| c.* = std.ascii.toUpper(c.*);
 }
 
-pub fn view(ui: *app.Ui, state: *const State, _: Props) !void {
+pub fn view(ui: *app.Ui, state: *const State, props: Props) !void {
     const on = ui.messages(Hybrid);
     const theme = ui.use(app.native.Theme);
 
     try ui.open(null, .{
         .layout = .{ .sizing = .grow(.{}), .axis = .y },
-        .background_color = theme.window_background,
+        .background_color = if (props.page) theme.window_background else .transparent,
     });
     defer ui.close();
 
@@ -198,10 +206,16 @@ pub fn view(ui: *app.Ui, state: *const State, _: Props) !void {
         try row(ui);
         defer ui.close();
         try ui.text("Rating", font(theme, theme.font_size, theme.text));
-        // a widget only AppKit has, and the common one elsewhere
-        switch (comptime app.platform.kind) {
-            .appkit => try app.platform.appkit.widgets.levelIndicator(ui, "rating", .{ .value = state.rating, .on_change = on.handler(.rate) }),
-            else => try widgets.slider(ui, "rating", .{ .value = state.rating, .max = 5, .on_change = on.handler(.rate) }),
+        // a widget only AppKit has, and the common one elsewhere, or where
+        // the controls are drawn
+        if (comptime app.platform.kind == .appkit) {
+            if (ui.hasNativeWidgets()) {
+                try app.platform.appkit.widgets.levelIndicator(ui, "rating", .{ .value = state.rating, .on_change = on.handler(.rate) });
+            } else {
+                try widgets.slider(ui, "rating", .{ .value = state.rating, .max = 5, .on_change = on.handler(.rate) });
+            }
+        } else {
+            try widgets.slider(ui, "rating", .{ .value = state.rating, .max = 5, .on_change = on.handler(.rate) });
         }
         try ui.print(font(theme, theme.font_size, theme.secondary_text), "{d:.0} of 5; greeted {d} times, last answer {?d}", .{ state.rating, state.greetings, state.answer });
     }
