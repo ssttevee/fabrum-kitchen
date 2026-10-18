@@ -35,8 +35,8 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&b.addRunArtifact(ui_tests).step);
 
-    // The GUI runs on AppKit and draws with Quartz, so it only exists on
-    // macOS with the native platform.
+    // The GUI runs on AppKit, whose canvas fabrum draws with Quartz, so it
+    // only exists on macOS with the native platform.
     if (target.result.os.tag == .macos and (platform orelse .native) == .native) {
         addGui(b, target, optimize, fabrum_mod, test_step);
     }
@@ -52,22 +52,11 @@ fn addGui(
     fabrum_mod: *std.Build.Module,
     test_step: *std.Build.Step,
 ) void {
-    const quartz_dep = b.dependency("fabrum_renderer_quartz", .{ .target = target, .optimize = optimize });
-    const quartz_mod = quartz_dep.module("fabrum-renderer-quartz");
-    // The renderer asks for fabrum without the arguments given to ours
-    // above, and Zig makes one instance of a dependency per set of
-    // arguments as passed: two fabrum modules in one program fail with
-    // "file exists in modules 'lib' and 'lib0'". So the renderer gets ours.
-    quartz_mod.addImport("fabrum", fabrum_mod);
-
     const gui_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{
-            .{ .name = "fabrum", .module = fabrum_mod },
-            .{ .name = "fabrum-renderer-quartz", .module = quartz_mod },
-        },
+        .imports = &.{.{ .name = "fabrum", .module = fabrum_mod }},
     });
 
     const gui = b.addExecutable(.{ .name = "kitchen", .root_module = gui_mod });

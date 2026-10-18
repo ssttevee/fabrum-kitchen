@@ -1,5 +1,5 @@
 //! The Kitchen's macOS GUI: the interface in `kitchen.zig`, run by
-//! fabrum.app on its AppKit platform and drawn with the Quartz renderer.
+//! fabrum.app on its AppKit platform, whose canvas draws with Quartz.
 //!
 //! It shows the hybrid screen (`kitchen.Hybrid`): AppKit's own controls
 //! laid out by fabrum, with drawn content between and over them.
@@ -20,15 +20,14 @@ const Io = std.Io;
 
 const fabrum = @import("fabrum");
 const appkit = fabrum.app.platform.appkit;
-const Quartz = @import("fabrum-renderer-quartz");
 
 const kitchen = @import("kitchen.zig");
 const Icons = @import("icons.zig");
 const Script = @import("script.zig").Script;
 const LayoutFile = @import("script.zig").LayoutFile;
 
-pub const HybridApp = appkit.App(kitchen.Hybrid, Quartz);
-pub const DrawnApp = appkit.App(kitchen.Kitchen, Quartz);
+pub const HybridApp = appkit.App(kitchen.Hybrid);
+pub const DrawnApp = appkit.App(kitchen.Kitchen);
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;

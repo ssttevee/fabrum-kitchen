@@ -7,10 +7,6 @@
         .fabrum = .{
             .path = "../zig-layout",
         },
-        // Only the macOS GUI uses it.
-        .fabrum_renderer_quartz = .{
-            .path = "../zig-fabrum-renderer-quartz",
-        },
         // kitchen-none draws with one of these (-Drenderer).
         .fabrum_renderer_z2d = .{
             .path = "../zig-fabrum-renderer-z2d",

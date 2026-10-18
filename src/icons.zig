@@ -9,7 +9,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const fabrum = @import("fabrum");
-const Quartz = @import("fabrum-renderer-quartz");
+const Quartz = @import("fabrum").render.Quartz;
 const Picture = Quartz.content.Picture;
 
 const theme = @import("kitchen.zig").theme;
