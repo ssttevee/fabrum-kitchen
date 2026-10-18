@@ -18,6 +18,8 @@
 //!   group; `step=<key>:<n>`: steps a native stepper `n` up (or down);
 //! - `answermenu=<id>`, `answermenu=`: chooses an item of the popup menu
 //!   being shown (`Update.menu`), or dismisses it;
+//! - `scroll=<key>:<y>`: scrolls a native scroll view so that `y` of its
+//!   content is at its top, as far as it goes;
 //! - `tab`, `backtab`: Tab and Shift-Tab through AppKit's own key-view
 //!   routing, from wherever focus is;
 //! - `space`: Space on the canvas, which clicks a focused drawn element;
@@ -131,6 +133,10 @@ pub fn Script(comptime App: type) type {
                     automation.step(try self.handle(split.key), try std.fmt.parseInt(i32, split.value, 10));
                 },
                 .answermenu => |id| try automation.answerPopup(if (id.len == 0) null else try std.fmt.parseInt(usize, id, 10)),
+                .scroll => |arg| {
+                    const split = try keyed(arg);
+                    automation.scrollTo(try self.handle(split.key), .init(0, try std.fmt.parseFloat(f32, split.value)));
+                },
                 .tab => automation.tab(true),
                 .backtab => automation.tab(false),
                 .space => App.activate(self.gui),
@@ -374,6 +380,7 @@ const Step = union(enum) {
     select: []const u8,
     step: []const u8,
     answermenu: []const u8,
+    scroll: []const u8,
     tab,
     backtab,
     space,
