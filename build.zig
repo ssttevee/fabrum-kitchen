@@ -1,12 +1,17 @@
 const std = @import("std");
 
-/// fabrum's `platform` option; see `fabrum.app.platform.Option`.
-const Platform = enum { native, gtk, qt, headless };
+/// fabrum's `platform` option; see `fabrum.app.platform.Option`. Only the
+/// platforms fabrum has.
+const Platform = enum { native, none };
+
+/// The portable renderers `kitchen-none` can draw with.
+const RendererChoice = enum { z2d, thorvg };
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const platform = b.option(Platform, "platform", "fabrum's toolkit: native (the default: AppKit on macOS), or headless for the interface's tests alone");
+    const platform = b.option(Platform, "platform", "fabrum's platform for the GUI and the interface's tests: native (the default: AppKit on macOS) or none (drawn widgets)");
+    const renderer = b.option(RendererChoice, "renderer", "What kitchen-none draws with: z2d (the default; pure Zig) or thorvg") orelse .z2d;
 
     // Passed on only when given: fabrum's own default is `native`.
     const fabrum_dep = if (platform) |p|
@@ -18,8 +23,8 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run tests");
 
     // The interface and its update logic run without a window, against
-    // fabrum's heuristic text measurement and headless native widgets, on
-    // any OS.
+    // fabrum's heuristic text measurement and its fake native widget tree
+    // (or drawn widgets), on any OS.
     const ui_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/kitchen.zig"),
@@ -35,6 +40,8 @@ pub fn build(b: *std.Build) void {
     if (target.result.os.tag == .macos and (platform orelse .native) == .native) {
         addGui(b, target, optimize, fabrum_mod, test_step);
     }
+
+    addNone(b, target, optimize, renderer, test_step);
 }
 
 /// The `kitchen` executable, its `run` step and its tests.
@@ -74,4 +81,49 @@ fn addGui(
 
     const gui_tests = b.addTest(.{ .root_module = gui_mod });
     test_step.dependOn(&b.addRunArtifact(gui_tests).step);
+}
+
+/// `kitchen-none`: the Kitchen hosted by its own code on fabrum's `none`
+/// platform, drawn into pixels by a portable renderer. It always uses a
+/// fabrum built for `none`, whatever `-Dplatform` says, and builds for any
+/// target.
+fn addNone(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    choice: RendererChoice,
+    test_step: *std.Build.Step,
+) void {
+    const fabrum_none = b.dependency("fabrum", .{ .target = target, .optimize = optimize, .platform = .none }).module("fabrum");
+    // the renderer packages don't depend on fabrum: they take the app's
+    const renderer_mod = switch (choice) {
+        .z2d => (b.lazyDependency("fabrum_renderer_z2d", .{ .target = target, .optimize = optimize }) orelse return).module("fabrum-renderer-z2d"),
+        .thorvg => (b.lazyDependency("fabrum_renderer_thorvg", .{ .target = target, .optimize = optimize }) orelse return).module("fabrum-renderer-thorvg"),
+    };
+    renderer_mod.addImport("fabrum", fabrum_none);
+
+    const options = b.addOptions();
+    options.addOption([]const u8, "renderer", @tagName(choice));
+
+    const none_mod = b.createModule(.{
+        .root_source_file = b.path("src/none.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "fabrum", .module = fabrum_none },
+            .{ .name = "renderer", .module = renderer_mod },
+        },
+    });
+    none_mod.addOptions("kitchen_options", options);
+
+    const exe = b.addExecutable(.{ .name = "kitchen-none", .root_module = none_mod });
+    b.installArtifact(exe);
+
+    const run_step = b.step("run-none", "Build kitchen-none, play its script, and write PNGs to /tmp/kitchen-snapshots/none");
+    const run = b.addRunArtifact(exe);
+    run.addPassthruArgs();
+    run_step.dependOn(&run.step);
+
+    const none_tests = b.addTest(.{ .root_module = none_mod });
+    test_step.dependOn(&b.addRunArtifact(none_tests).step);
 }
