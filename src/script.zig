@@ -19,6 +19,11 @@
 //! - `space`: Space on the canvas, which clicks a focused drawn element;
 //! - `menu=<menu>/<item>`: chooses a menu bar item;
 //! - `answer=<index>`: answers the alert being shown;
+//! - `choose=<path>`, `choose=`: answers the file chooser being shown with
+//!   a path, or cancels it;
+//! - `privateclipboard`: makes the clipboard a private pasteboard, so
+//!   copying and pasting never touch the user's; `clipboard` prints it;
+//! - `close`: the window's close button;
 //! - `resize=<width>x<height>`: resizes the window's content;
 //! - `dump`: prints the theme, the focus, the native views and the drawn
 //!   texts;
@@ -135,6 +140,16 @@ pub fn Script(comptime App: type) type {
                     );
                 },
                 .answer => |index| automation.answerAlert(try std.fmt.parseInt(usize, index, 10)),
+                .choose => |path| {
+                    var buffer: [std.fs.max_path_bytes]u8 = undefined;
+                    try automation.answerFileChooser(if (path.len == 0) null else try std.fmt.bufPrintSentinel(&buffer, "{s}", .{path}, 0));
+                },
+                .privateclipboard => automation.usePrivateClipboard(),
+                .clipboard => {
+                    var buffer: [256]u8 = undefined;
+                    std.debug.print("clipboard: \"{s}\"\n", .{automation.clipboardText(&buffer)});
+                },
+                .close => automation.runOnMain(closeLater, null),
                 .resize => |size| {
                     const x = std.mem.indexOfScalar(u8, size, 'x') orelse return error.BadStep;
                     automation.resize(try std.fmt.parseFloat(f64, size[0..x]), try std.fmt.parseFloat(f64, size[x + 1 ..]));
@@ -347,6 +362,10 @@ const Step = union(enum) {
     key: []const u8,
     menu: []const u8,
     answer: []const u8,
+    choose: []const u8,
+    privateclipboard,
+    clipboard,
+    close,
     resize: []const u8,
     dump,
     hit: []const u8,
@@ -385,6 +404,10 @@ fn snapshot(path: []const u8, scale: ?f64) !void {
 
 fn quitLater(_: ?*anyopaque) callconv(.c) void {
     automation.quit();
+}
+
+fn closeLater(_: ?*anyopaque) callconv(.c) void {
+    automation.close();
 }
 
 test "steps parse by name" {

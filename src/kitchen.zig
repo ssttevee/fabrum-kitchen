@@ -333,6 +333,36 @@ test "the drawn dialog is a canvas layer above the native line editor" {
     try testing.expectEqual(@as(usize, 2), h.runtime.scene().layers.len);
 }
 
+test "the shell: a file chooser, the clipboard, and asking before quitting with unsent text" {
+    var h = try hybrid();
+    defer h.deinit();
+    try h.frame();
+    const r = h.root();
+
+    try h.clickNative(r.native("open file"));
+    try testing.expectEqualStrings("Choose an image", h.tree.file_requests.items[0].message);
+    try h.chooseFile("/tmp/raspios.img");
+    try h.expectText("Opened: /tmp/raspios.img");
+
+    try h.typeText(r.native("line"), "News");
+    try h.submit(r.native("line"));
+    try h.clickNative(r.native("copy heading"));
+    try testing.expectEqualStrings("News", h.tree.clipboard.?);
+    try h.clickNative(r.native("paste notes"));
+    try testing.expectEqualStrings("News", (try h.expectWidget(r.native("notes"))).value.text);
+
+    // nothing unsent: closing goes ahead
+    try testing.expect(try h.requestClose(.quit));
+    // unsent text: the app asks, and Cancel keeps it
+    try h.typeText(r.native("line"), "draft");
+    try testing.expect(!try h.requestClose(.quit));
+    try h.respond(r.native("closing"), 1);
+    try testing.expectEqual(@as(usize, 0), h.tree.quits);
+    try testing.expect(!try h.requestClose(.window));
+    try h.respond(r.native("closing"), 0);
+    try testing.expectEqual(@as(usize, 1), h.tree.quits);
+}
+
 test "Say Hello shows a native alert whose answer comes back as a message" {
     var h = try hybrid();
     defer h.deinit();

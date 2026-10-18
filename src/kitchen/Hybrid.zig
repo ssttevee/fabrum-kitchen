@@ -13,6 +13,9 @@
 //!   change what was typed, which is written back without breaking typing.
 //! - The menu bar has Kitchen > Say Hello (Cmd-K), which shows a native
 //!   alert; its answer comes back as a message.
+//! - The shell: "Open image…" shows the platform's file chooser, "Copy
+//!   heading" and "Paste into notes" use the clipboard, and while the line
+//!   editor has text, closing the window or quitting asks first.
 //! - The page scrolls natively: it is an `NSScrollView` whose document
 //!   holds the native controls and a canvas layer for the drawn content,
 //!   laid out by fabrum. A section of rows at the end makes it taller than
@@ -64,11 +67,16 @@ pub const State = struct {
     /// last, in the scrolling section.
     picked: ?u8 = null,
     selected: ?u8 = null,
+    /// The file last chosen, or "" if none or cancelled.
+    opened: std.ArrayList(u8) = .empty,
+    /// Why the app is asking before closing, while it asks.
+    closing: ?app.platform.CloseReason = null,
 
     pub fn deinit(self: *State, gpa: Allocator) void {
         self.heading.deinit(gpa);
         self.line.deinit(gpa);
         self.notes.deinit(gpa);
+        self.opened.deinit(gpa);
     }
 };
 
@@ -90,6 +98,13 @@ pub const Msg = union(enum) {
     answered: usize,
     pick: u8,
     select: u8,
+    open_file,
+    file_chosen: ?[]const u8,
+    copy_heading,
+    paste_notes,
+    notes_pasted: ?[]const u8,
+    close_requested: app.platform.CloseReason,
+    close_answered: usize,
 };
 
 /// How many rows the scrolling section has.
@@ -106,7 +121,7 @@ pub const Props = struct {
     page: bool = true,
 };
 
-pub fn update(state: *State, msg: Msg, ctx: *app.Update(Hybrid)) void {
+pub fn update(state: *State, msg: Msg, ctx: *app.Update(Hybrid)) !void {
     const gpa = ctx.gpa;
     switch (msg) {
         .toggle_green => state.green = !state.green,
@@ -145,6 +160,18 @@ pub fn update(state: *State, msg: Msg, ctx: *app.Update(Hybrid)) void {
         },
         .pick => |index| state.picked = index,
         .select => |index| state.selected = index,
+        .open_file => try ctx.openFile(.{ .message = "Choose an image", .extensions = &.{ "img", "iso", "xz", "zip" } }, ctx.handler(.file_chosen)),
+        // the path is borrowed: copy it
+        .file_chosen => |path| replace(&state.opened, gpa, path orelse ""),
+        .copy_heading => try ctx.writeClipboard(if (state.heading.items.len > 0) state.heading.items else "Hello, fabrum"),
+        .paste_notes => try ctx.readClipboard(ctx.handler(.notes_pasted)),
+        .notes_pasted => |text| if (text) |t| replace(&state.notes, gpa, t),
+        .close_requested => |reason| state.closing = reason,
+        .close_answered => |button| {
+            state.closing = null;
+            // "Quit" is the first
+            if (button == 0) try ctx.quit();
+        },
     }
 }
 
@@ -172,6 +199,14 @@ pub fn view(ui: *app.Ui, state: *const State, props: Props) !void {
     try page(ui, state, theme);
 
     try menus.item(ui, "say hello", .{ .menu = "Kitchen", .title = "Say Hello", .key = "k", .on_select = on.bind(.say_hello) });
+    // unsent text in the line editor: ask before closing
+    if (state.line.items.len > 0) ui.guardClose(on.handler(.close_requested));
+    if (state.closing) |reason| try dialogs.alert(ui, "closing", .{
+        .title = if (reason == .quit) "Quit the Kitchen?" else "Close the Kitchen?",
+        .message = "The line editor's text hasn't been sent.",
+        .buttons = &.{ if (reason == .quit) "Quit" else "Close", "Cancel" },
+        .on_response = on.handler(.close_answered),
+    });
     if (state.greeting) try dialogs.alert(ui, "hello", .{
         .title = "Hello from fabrum",
         .message = "A native alert, declared by a view and answered with a message.",
@@ -258,6 +293,15 @@ fn page(ui: *app.Ui, state: *const State, theme: *const app.native.Theme) !void 
             try widgets.slider(ui, "rating", .{ .value = state.rating, .max = 5, .on_change = on.handler(.rate) });
         }
         try ui.print(font(theme, theme.font_size, theme.secondary_text), "{d:.0} of 5; greeted {d} times, last answer {?d}", .{ state.rating, state.greetings, state.answer });
+    }
+    {
+        try row(ui);
+        defer ui.close();
+        try ui.text("Shell", font(theme, theme.font_size, theme.text));
+        try widgets.button(ui, "open file", .{ .label = "Open image…", .on_click = on.bind(.open_file) });
+        try widgets.button(ui, "copy heading", .{ .label = "Copy heading", .on_click = on.bind(.copy_heading) });
+        try widgets.button(ui, "paste notes", .{ .label = "Paste into notes", .on_click = on.bind(.paste_notes) });
+        try ui.print(font(theme, theme.font_size, theme.secondary_text), "Opened: {s}", .{if (state.opened.items.len > 0) state.opened.items else "nothing"});
     }
     try rows(ui, state, theme);
 }
