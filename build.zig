@@ -1,16 +1,25 @@
 const std = @import("std");
 
+/// fabrum's `platform` option; see `fabrum.app.platform.Option`.
+const Platform = enum { native, gtk, qt, headless };
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const platform = b.option(Platform, "platform", "fabrum's toolkit: native (the default: AppKit on macOS), or headless for the interface's tests alone");
 
-    const fabrum_dep = b.dependency("fabrum", .{ .target = target, .optimize = optimize });
+    // Passed on only when given: fabrum's own default is `native`.
+    const fabrum_dep = if (platform) |p|
+        b.dependency("fabrum", .{ .target = target, .optimize = optimize, .platform = p })
+    else
+        b.dependency("fabrum", .{ .target = target, .optimize = optimize });
     const fabrum_mod = fabrum_dep.module("fabrum");
 
     const test_step = b.step("test", "Run tests");
 
     // The interface and its update logic run without a window, against
-    // fabrum's heuristic text measurement, on any OS.
+    // fabrum's heuristic text measurement and headless native widgets, on
+    // any OS.
     const ui_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/kitchen.zig"),
@@ -21,8 +30,9 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&b.addRunArtifact(ui_tests).step);
 
-    // The GUI renders with Quartz, so it only exists on macOS.
-    if (target.result.os.tag == .macos) {
+    // The GUI runs on AppKit and draws with Quartz, so it only exists on
+    // macOS with the native platform.
+    if (target.result.os.tag == .macos and (platform orelse .native) == .native) {
         addGui(b, target, optimize, fabrum_mod, test_step);
     }
 }
@@ -36,17 +46,12 @@ fn addGui(
     test_step: *std.Build.Step,
 ) void {
     const quartz_dep = b.dependency("fabrum_renderer_quartz", .{ .target = target, .optimize = optimize });
-
-    // TEMPORARY: the platform shell, laid out as `fabrum.app.platform`
-    // will be. Once it moves into fabrum, fabrum's build adds its sources
-    // and frameworks to the `fabrum` module and this module goes away.
-    const platform_mod = b.createModule(.{
-        .root_source_file = b.path("src/platform.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{.{ .name = "fabrum", .module = fabrum_mod }},
-    });
-    addMacosPlatform(b, platform_mod);
+    const quartz_mod = quartz_dep.module("fabrum-renderer-quartz");
+    // The renderer asks for fabrum without the arguments given to ours
+    // above, and Zig makes one instance of a dependency per set of
+    // arguments as passed: two fabrum modules in one program fail with
+    // "file exists in modules 'lib' and 'lib0'". So the renderer gets ours.
+    quartz_mod.addImport("fabrum", fabrum_mod);
 
     const gui_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -54,8 +59,7 @@ fn addGui(
         .optimize = optimize,
         .imports = &.{
             .{ .name = "fabrum", .module = fabrum_mod },
-            .{ .name = "fabrum-platform", .module = platform_mod },
-            .{ .name = "fabrum-renderer-quartz", .module = quartz_dep.module("fabrum-renderer-quartz") },
+            .{ .name = "fabrum-renderer-quartz", .module = quartz_mod },
         },
     });
 
@@ -70,17 +74,4 @@ fn addGui(
 
     const gui_tests = b.addTest(.{ .root_module = gui_mod });
     test_step.dependOn(&b.addRunArtifact(gui_tests).step);
-}
-
-/// Adds the AppKit half of the macOS shell and the frameworks it needs:
-/// what fabrum's build will do for the `fabrum` module when its
-/// `platform` option is on.
-fn addMacosPlatform(b: *std.Build, module: *std.Build.Module) void {
-    module.addCSourceFiles(.{
-        .root = b.path("src/platform/macos"),
-        .files = &.{"shell.m"},
-        .language = .objective_c,
-        .flags = &.{"-fobjc-arc"},
-    });
-    module.linkFramework("AppKit", .{});
 }
