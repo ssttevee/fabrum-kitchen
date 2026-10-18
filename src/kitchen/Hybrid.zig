@@ -5,7 +5,8 @@
 //!   the two editors are native (`app.widgets`); "Flat", the heading, the
 //!   labels and the radio buttons are drawn, in a canvas strip.
 //! - "Open dialog" opens a drawn dialog over the native line editor, which
-//!   a canvas layer above the native views draws.
+//!   a canvas layer above the native views draws; it is modal, so focus and
+//!   Tab stay inside it.
 //! - Tab goes through native fields and drawn radio buttons in one order.
 //! - The line editor is controlled: typing updates the model; Enter moves
 //!   its text to the heading and clears it; "Uppercase" makes the model
@@ -246,6 +247,8 @@ fn dialog(ui: *app.Ui, theme: *const app.native.Theme) !void {
         .background_color = .rgba(0, 0, 0, 90),
         // clicks on the backdrop go nowhere, but don't reach what's under it
         .on_click = on.bind(.ignore),
+        // nor does the keyboard: Tab stays in the dialog
+        .modal = true,
     });
     defer ui.close();
     try ui.open("dialog", .{
@@ -268,14 +271,16 @@ fn font(theme: *const app.native.Theme, size: f32, color: Color) fabrum.layout.t
 /// A drawn button in the accent color, focusable, with a focus ring.
 fn drawnButton(ui: *app.Ui, key: anytype, label: []const u8, on_click: app.Action, theme: *const app.native.Theme) !void {
     const fill = if (ui.pressed(key)) mix(theme.accent, .black, 0.15) else if (ui.hovered(key)) mix(theme.accent, .white, 0.12) else theme.accent;
+    // the ring goes around the fill, since borders are drawn inside the box
     try ui.open(key, .{
-        .layout = .{ .padding = .init(14, 14, 6, 6) },
-        .background_color = fill,
-        .corner_radius = .uniform(6),
+        .layout = .{ .padding = .all(3) },
+        .corner_radius = .uniform(9),
         .border = .{ .color = if (ui.focused(key)) theme.focus_ring else .transparent, .widths = .outside(3) },
         .on_click = on_click,
         .focusable = true,
     });
+    defer ui.close();
+    try ui.open(null, .{ .layout = .{ .padding = .init(14, 14, 6, 6) }, .background_color = fill, .corner_radius = .uniform(6) });
     defer ui.close();
     try ui.text(label, font(theme, theme.font_size, .white));
 }

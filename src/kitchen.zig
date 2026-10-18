@@ -270,7 +270,14 @@ test "the drawn dialog is a canvas layer above the native line editor" {
     try h.frame();
     try testing.expectEqual(@as(usize, 1), h.runtime.scene().layers.len);
 
+    try h.clickNative(h.root().native("line"));
+    try h.typeText(h.root().native("line"), "typing");
+    try h.expectFocused(h.root().element("line"));
     try h.click("Open dialog");
+    // the modal dialog took focus from the field it covers
+    try h.expectFocused(h.root().element("close dialog"));
+    try h.tab();
+    try h.expectFocused(h.root().element("close dialog"));
     const scene = h.runtime.scene();
     try testing.expectEqual(@as(usize, 2), scene.layers.len);
     try testing.expectEqual(app.native.Scene.Slot{ .canvas = 1 }, scene.slots[scene.slots.len - 1]);

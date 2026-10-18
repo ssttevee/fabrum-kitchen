@@ -209,6 +209,13 @@ pub fn Script(comptime App: type) type {
             const scene = self.gui.runtime.scene();
             std.debug.print("scene: {d} slots, {d} canvas layers:", .{ scene.slots.len, scene.layers.len });
             for (scene.slots) |slot| std.debug.print(" {s}", .{if (slot == .canvas) "canvas" else "native"});
+            for (scene.layers, 0..) |layer, index| {
+                var counts = std.EnumArray(std.meta.Tag(fabrum.layout.RenderCommand.Data), usize).initFill(0);
+                for (layer.commands) |command| counts.getPtr(command.data).* += 1;
+                std.debug.print("\nlayer {d}:", .{index});
+                var it = counts.iterator();
+                while (it.next()) |entry| if (entry.value.* > 0) std.debug.print(" {t}={d}", .{ entry.key, entry.value.* });
+            }
             std.debug.print("\ntexts:", .{});
             var it: app.testing.TextIterator(Text) = .init(self.gui.runtime.context());
             while (it.next()) |found| std.debug.print(" \"{s}\"", .{found.content.text});
