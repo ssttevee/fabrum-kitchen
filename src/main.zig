@@ -11,7 +11,9 @@
 //!
 //! Debug builds read `KITCHEN_SCRIPT`, steps to run once the window is up,
 //! for checking screens without touching the real pointer or keyboard, so
-//! most of them work while the Mac is locked; see `script.zig`.
+//! most of them work while the Mac is locked; see `script.zig`. They also
+//! write where the hybrid screen's elements are to `KITCHEN_LAYOUT_FILE`,
+//! for drivers that click them with real input.
 const std = @import("std");
 const builtin = @import("builtin");
 const Io = std.Io;
@@ -23,6 +25,7 @@ const Quartz = @import("fabrum-renderer-quartz");
 const kitchen = @import("kitchen.zig");
 const Icons = @import("icons.zig");
 const Script = @import("script.zig").Script;
+const LayoutFile = @import("script.zig").LayoutFile;
 
 pub const HybridApp = appkit.App(kitchen.Hybrid, Quartz);
 pub const DrawnApp = appkit.App(kitchen.Kitchen, Quartz);
@@ -64,6 +67,7 @@ pub fn main(init: std.process.Init) !void {
         const gui = try gpa.create(HybridApp);
         try gui.init(gpa, io, .{}, window, .{ .provide = provide });
         try runScript(HybridApp, gui, init);
+        try writeLayout(gui, init);
         gui.run();
     }
 }
@@ -77,6 +81,17 @@ fn runScript(comptime App: type, gui: *App, init: std.process.Init) !void {
     const group = try init.gpa.create(Io.Group);
     group.* = .init;
     try group.concurrent(init.io, Script(App).run, .{script});
+}
+
+/// Starts writing `KITCHEN_LAYOUT_FILE`, in debug builds.
+fn writeLayout(gui: *HybridApp, init: std.process.Init) !void {
+    if (builtin.mode != .debug) return;
+    const path = init.environ_map.get("KITCHEN_LAYOUT_FILE") orelse return;
+    const writer = try init.gpa.create(LayoutFile(HybridApp));
+    writer.* = .{ .gui = gui, .io = init.io, .gpa = init.gpa, .path = path };
+    const group = try init.gpa.create(Io.Group);
+    group.* = .init;
+    try group.concurrent(init.io, LayoutFile(HybridApp).run, .{writer});
 }
 
 test {

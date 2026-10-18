@@ -224,6 +224,98 @@ pub fn Script(comptime App: type) type {
     };
 }
 
+/// Writes where the hybrid screen's elements are to a file, ten times a
+/// second, for drivers that click them with real input
+/// (`KITCHEN_LAYOUT_FILE`). Lines are tab-separated, in points from the top
+/// left of the window's content:
+///
+/// - `window <number> <width> <height>`: the window's number and the
+///   content's size;
+/// - `focus <AppKit's first responder> <fabrum's focus>`;
+/// - `element <key> <x> <y> <w> <h>`: a drawn element, or a native
+///   element's box;
+/// - `native <key> <x> <y> <w> <h> <value>`: a native view's frame and what
+///   it shows;
+/// - `text <x> <y> <w> <h> <text>`: drawn text.
+///
+/// The file is replaced whole, so readers never see half of it.
+pub fn LayoutFile(comptime App: type) type {
+    return struct {
+        gui: *App,
+        io: Io,
+        gpa: std.mem.Allocator,
+        path: []const u8,
+
+        const Self = @This();
+        const Root = App.Root;
+        const Text = App.Runtime.Text;
+        const Hybrid = @import("kitchen.zig").Hybrid;
+
+        const native_keys = .{ "icon text", "click me", "green", "progress", "transform", "switch", "switched", "slider", "line", "uppercase", "notes", "rating" };
+        const drawn_keys = .{ "flat", "strip", "open dialog", "close dialog", "backdrop", "dialog" };
+
+        pub fn run(self: *Self) Io.Cancelable!void {
+            while (true) {
+                try self.io.sleep(.fromMilliseconds(100), .awake);
+                automation.runOnMain(onMain, self);
+            }
+        }
+
+        fn onMain(ctx: ?*anyopaque) callconv(.c) void {
+            const self: *Self = @ptrCast(@alignCast(ctx.?));
+            self.write() catch |err| std.log.err("writing the layout file failed: {t}", .{err});
+        }
+
+        fn write(self: *Self) !void {
+            var out: Io.Writer.Allocating = .init(self.gpa);
+            defer out.deinit();
+            const w = &out.writer;
+            var buffer: [256]u8 = undefined;
+            try w.print("window\t{d}\t{d}\t{d}\n", .{ automation.windowNumber(), self.gui.viewport.x, self.gui.viewport.y });
+            try w.print("focus\t{s}\t{?}\n", .{ automation.describeFocus(&buffer), self.gui.runtime.focused() });
+            const context = self.gui.runtime.context();
+            const root = app.testing.rootInstance(Root);
+            if (Root == Hybrid) {
+                inline for (drawn_keys ++ native_keys) |key| try element(w, context, key, root.element(key));
+                inline for (.{ Hybrid.Choice.r1, Hybrid.Choice.r2, Hybrid.Choice.r3 }) |choice| try element(w, context, @tagName(choice), root.element(choice));
+                const records = self.gui.runtime.reconciler().records;
+                inline for (native_keys) |key| if (records.getPtr(root.native(key))) |record| {
+                    const f = record.frame orelse fabrum.Rect{ .x = 0, .y = 0, .w = 0, .h = 0 };
+                    try w.print("native\t{s}\t{d}\t{d}\t{d}\t{d}\t", .{ key, f.x, f.y, f.w, f.h });
+                    switch (record.spec) {
+                        .text_field => try w.print("text={s} composing={}", .{
+                            automation.fieldText(record.handle, &buffer),
+                            self.gui.backend.backend().composing(record.handle),
+                        }),
+                        .button => |b| try w.print("title={s} enabled={}", .{ b.title, b.enabled }),
+                        else => switch (record.shown) {
+                            .toggle => |on| try w.print("on={}", .{on}),
+                            .number => |n| try w.print("value={d}", .{n}),
+                            else => {},
+                        },
+                    }
+                    try w.writeAll("\n");
+                };
+            }
+            var it: app.testing.TextIterator(Text) = .init(context);
+            while (it.next()) |found| {
+                const b = found.unit.bbox;
+                try w.print("text\t{d}\t{d}\t{d}\t{d}\t{s}\n", .{ b.x, b.y, b.w, b.h, found.content.text });
+            }
+            var tmp: [std.fs.max_path_bytes]u8 = undefined;
+            const tmp_path = try std.fmt.bufPrint(&tmp, "{s}.tmp", .{self.path});
+            try Io.Dir.cwd().writeFile(self.io, .{ .sub_path = tmp_path, .data = out.written() });
+            try Io.Dir.rename(.cwd(), tmp_path, .cwd(), self.path, self.io);
+        }
+
+        fn element(w: *Io.Writer, context: anytype, key: []const u8, id: fabrum.layout.Unit.Id) !void {
+            const unit = context.getUnitById(id) orelse return;
+            const b = unit.bbox;
+            try w.print("element\t{s}\t{d}\t{d}\t{d}\t{d}\n", .{ key, b.x, b.y, b.w, b.h });
+        }
+    };
+}
+
 const Step = union(enum) {
     click: []const u8,
     hover: []const u8,
