@@ -2,7 +2,7 @@ const std = @import("std");
 
 /// fabrum's `platform` option; see `fabrum.app.platform.Option`. Only the
 /// platforms fabrum has.
-const Platform = enum { native, none };
+const Platform = enum { native, gtk, none };
 
 /// The portable renderers `kitchen-none` can draw with.
 const RendererChoice = enum { z2d, thorvg };
@@ -10,7 +10,7 @@ const RendererChoice = enum { z2d, thorvg };
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const platform = b.option(Platform, "platform", "fabrum's platform for the GUI and the interface's tests: native (the default: AppKit on macOS) or none (drawn widgets)");
+    const platform = b.option(Platform, "platform", "fabrum's platform for the GUI and the interface's tests: native (the default: AppKit on macOS), gtk (GTK 4, through pkg-config) or none (drawn widgets)");
     const renderer = b.option(RendererChoice, "renderer", "What kitchen-none draws with: z2d (the default; pure Zig) or thorvg") orelse .z2d;
 
     // Passed on only when given: fabrum's own default is `native`.
@@ -39,6 +39,10 @@ pub fn build(b: *std.Build) void {
     // only exists on macOS with the native platform.
     if (target.result.os.tag == .macos and (platform orelse .native) == .native) {
         addGui(b, target, optimize, fabrum_mod, test_step);
+    }
+    // The GUI on GTK 4, wherever GTK is: `kitchen-gtk`.
+    if (platform == .gtk) {
+        addGtk(b, target, optimize, fabrum_mod, test_step);
     }
 
     addNone(b, target, optimize, renderer, test_step);
@@ -69,6 +73,33 @@ fn addGui(
     run_step.dependOn(&run_gui.step);
 
     const gui_tests = b.addTest(.{ .root_module = gui_mod });
+    test_step.dependOn(&b.addRunArtifact(gui_tests).step);
+}
+
+/// The `kitchen-gtk` executable, its `run-gtk` step and its tests.
+fn addGtk(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    fabrum_mod: *std.Build.Module,
+    test_step: *std.Build.Step,
+) void {
+    const gtk_mod = b.createModule(.{
+        .root_source_file = b.path("src/main_gtk.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "fabrum", .module = fabrum_mod }},
+    });
+    const gui = b.addExecutable(.{ .name = "kitchen-gtk", .root_module = gtk_mod });
+    b.installArtifact(gui);
+
+    const run_step = b.step("run-gtk", "Build and run the Kitchen on GTK 4");
+    const run_gui = b.addRunArtifact(gui);
+    run_gui.step.dependOn(b.getInstallStep());
+    run_gui.addPassthruArgs();
+    run_step.dependOn(&run_gui.step);
+
+    const gui_tests = b.addTest(.{ .root_module = gtk_mod });
     test_step.dependOn(&b.addRunArtifact(gui_tests).step);
 }
 
