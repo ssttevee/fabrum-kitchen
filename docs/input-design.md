@@ -18,7 +18,7 @@ Contents:
 4. [Scrolling](#4-scrolling)
 5. [Dragging and pointer capture](#5-dragging-and-pointer-capture)
 6. [Keyboard input and focus](#6-keyboard-input-and-focus)
-7. [Text editing](#7-text-editing)
+7. [Text input and editing](#7-text-input-and-editing)
 8. [Animation and timed frames](#8-animation-and-timed-frames)
 9. [Drawing gaps: gradients, transforms, arcs, italics](#9-drawing-gaps-gradients-transforms-arcs-italics)
 10. [Disabled state](#10-disabled-state)
@@ -106,7 +106,7 @@ The Kitchen adds these rules:
 | Scrolling | applies `child_offset`; measures content size; clamps; culls offscreen units; keeps clipped children's min size from propagating up | offsets by element ID; wheel and trackpad routing, chaining and latching; momentum; scroll-into-view; scrollbar | delivers deltas with phase and momentum phase, in points | nested scissors (Quartz intersects already) |
 | Dragging | — | pointer capture; local coordinates; drag slop; cancellation | button state and window focus loss | — |
 | Keys and focus | — | focus by element ID; tab order from the last frame; key routing and bubbling; shortcuts | key codes, modifiers and repeat in, mapped to `Key` | — |
-| Text editing | caret rectangle and selection rectangles from text and offset; offset at a point; selection and caret draw as rectangle commands | editor model; edits as messages; IME mirror; caret blink; clipboard commands | NSTextInputClient and the other platforms' IMEs; clipboard; UTF-16 conversion | draws plain rectangles and text |
+| Text input and editing (§7) | caret, selection and hit-test geometry built on the shaper's line positions; selection, caret and pre-edit drawn as rectangle commands | `TextEditor` model and `EditCommand`s; key-to-command tables; focus; caret blink; clipboard commands | keys to text (layouts, dead keys, repeat); IME behind one interface (`NSTextInputClient`, `text-input-v3`, XIM, TSF); clipboard; UTF-16 conversion | shapes lines and answers caret positions (`caretPositions`, `offsetAtX`, `lineMetrics`); draws plain rectangles and text |
 | Animation | — | `now`; frame requests; timers as subscriptions | display link; one-shot wakeups | — |
 | Transforms and gradients | render commands carry them | hit-testing through inverse transforms | — | draws them |
 
@@ -363,14 +363,10 @@ pub const Focus = struct {
 
 ### Keys
 
-```zig
-pub const KeyEvent = struct {
-    key: Key,                 // logical key: .a ... .z, .digit_0 ..., .enter, .tab, .escape, .backspace,
-                              // .delete, .left, .right, .up, .down, .home, .end, .page_up, .page_down, .f1 ...
-    action: enum { press, repeat, release },
-    modifiers: Modifiers,     // shift, control, alt (Option), super (Command), plus `shortcut` = Command on macOS, Ctrl elsewhere
-};
-```
+`KeyEvent` carries the physical key, the logical key in the active layout, the action
+(`press`, `repeat` or `release`) and the modifiers. §7.1 defines it, along with how each
+platform produces it, key repeat, and shortcut matching on non-Latin layouts. Key events never
+carry text; text arrives as `TextInput` (§7.2).
 
 **Routing order:**
 
@@ -399,93 +395,290 @@ declared filter, not a check inside `update`, and it is Gio's reason for filters
 - Radio buttons are focusable. Space activates them through the runtime default.
 - Optional arrow-key roving inside the group is the widget's own `on_key`.
 
-## 7. Text editing
+## 7. Text input and editing
 
-### Model: controlled text, in the app's State
+IME is only one of three layers of text input. Each layer fails in its own ways; Zed's Linux
+issues were spread across all three. The design keeps them apart:
 
-Editable text is part of the app's model. The Kitchen sets the heading from the line editor and
-then clears it, which Gio does with `lineEditor.SetText("")`. In an Elm-style runtime the parent
-can't reach into a child component's state, so the editor's state lives in the parent's `State`.
-fabrum ships it as a library type, the "nested TEA" pattern:
+| Layer | Where | Job |
+|---|---|---|
+| **7.1 Keys to text** | platform | Physical and logical keys, layouts, dead keys and compose, modifiers, key repeat, shortcut matching |
+| **7.2 IME composition** | platform, behind one neutral interface in `app` | Pre-edit, commit and surrounding text, both ways, between the OS input method and the focused field |
+| **7.3 Editing behaviour** | `fabrum.app` editor and `fabrum.layout` text geometry, the same on every platform | Caret movement, selection, undo, clipboard, platform keymaps, all expressed as one neutral **edit command** vocabulary |
+
+Two things run under all three layers:
+
+- **Text geometry from the shaper** (§7.4): caret positions and hit-testing come from the
+  renderer's text shaper, not from layout heuristics.
+- **Unicode segmentation** (§7.5): grapheme and word boundaries. Bidi is deferred.
+
+Edge cases each get a test (§7.6). The work is staged (§7.7), so that the Kitchen's two editors
+are usable after stage 1.
+
+### 7.1 Keys to text (platform layer)
+
+`KeyEvent` (§6) carries both identities of a key, because shortcuts and text need different ones:
+
+```zig
+pub const KeyEvent = struct {
+    /// Where the key is, independent of layout: USB HID usage names (.key_a, .digit_1, .bracket_left, ...).
+    physical: PhysicalKey,
+    /// What the key means in the active layout, ignoring modifiers: a named key (.enter, .left, ...)
+    /// or the character it types unshifted (.char = 'с' on a Russian layout, 'a' on US).
+    key: Key,
+    action: enum { press, repeat, release },
+    modifiers: Modifiers, // shift, control, alt (Option), super (Command), caps_lock; `shortcut` = Command on macOS, Ctrl elsewhere
+};
+```
+
+**Key events never carry text.** Text arrives as `TextInput` (§7.2): `.commit` for ordinary
+typing, `.preedit` while composing. Every platform behaves alike this way, even where the OS
+hands over the character with the key (`WM_CHAR`, `xkb_state_key_get_utf8`). The platform turns
+those into commits itself.
+
+**How each platform turns keys into text:**
+
+- **macOS.** `keyDown:` → `interpretKeyEvents:`. AppKit applies the layout, dead keys (as marked
+  text, so even an accent goes through §7.2 on macOS), Option-characters and the user's
+  `DefaultKeyBinding.dict`. It calls back:
+  - `insertText:`;
+  - `setMarkedText:`;
+  - `doCommandBySelector:`, which becomes an edit command (§7.3).
+- **Windows.** `WM_KEYDOWN`, then `TranslateMessage` → `WM_CHAR` / `WM_DEADCHAR`. `ToUnicode` is
+  used for shortcut matching. Gotchas:
+  - AltGr arrives as Ctrl+Alt and must not trigger Ctrl or Alt shortcuts while it types a
+    character;
+  - `VK_PROCESSKEY` means the IME took the key.
+- **Linux, both backends.**
+  - `libxkbcommon`: `xkb_state` for layout and modifiers, and `xkb_compose_state` with the
+    locale's compose table for dead keys and Compose sequences. On Wayland the keymap comes from
+    `wl_keyboard.keymap`; on X11 from `libxkbcommon-x11`.
+  - fabrum runs compose itself when no IME is active, and leaves it to the IME when one is.
+
+**Key repeat.**
+
+| Platform | Who repeats | What the platform does |
+|---|---|---|
+| macOS | the OS (`isARepeat`) | passes `.repeat` through |
+| Windows | the OS (repeated `WM_KEYDOWN`) | passes `.repeat` through |
+| X11 | the X server | enables detectable auto-repeat (`XkbSetDetectableAutoRepeat`) so repeats don't arrive as release and press pairs |
+| Wayland | **the client** | the compositor only sends `repeat_info(rate, delay)`. The platform runs the timer: first repeat after `delay`, then `rate` per second. It stops on release, on `wl_keyboard.leave`, and when a different key is pressed. Keys the keymap marks as non-repeating (`xkb_keymap_key_repeats`), such as modifiers, are skipped |
+
+Repeats go through the same path as presses. A repeated arrow is a repeated edit command, and a
+repeated letter is a repeated commit.
+
+**Modifiers.**
+
+- Left and right modifiers are tracked but matched together.
+- Caps Lock affects text, not shortcuts.
+- On macOS, Option types characters. When a text input is focused, an Option+key that
+  `interpretKeyEvents:` turns into text is text. It reaches shortcuts only if a shortcut
+  explicitly asks for Alt/Option and nothing typed. This is AppKit's own precedence.
+
+**Shortcuts on non-Latin layouts.** Cmd+C on a Russian layout must copy.
+
+- Shortcuts match on `key` when the active layout produces a Latin character for that key.
+- Otherwise they match on the character the first ASCII-capable layout would produce for the
+  same `physical` key:
+  - macOS: `UCKeyTranslate` with `TISCopyCurrentASCIICapableKeyboardLayoutInputSource`, which is
+    what AppKit's key equivalents do;
+  - Linux: xkb's first Latin layout group, which is what GTK does;
+  - Windows: `ToUnicodeEx` with a US layout handle.
+- Named keys (arrows, Enter, F-keys) are layout-independent anyway.
+
+### 7.2 IME composition (platform layer, one neutral interface)
+
+**The neutral interface.** It has two directions.
+
+From the input method to the app, as `TextInput` messages for the focused text input:
+
+```zig
+pub const TextInput = union(enum) {
+    /// Replace the current pre-edit (none, if there is none) with `text`, shown underlined;
+    /// `cursor` is the IME's caret or highlighted clause within it. Empty `text` ends composition.
+    preedit: struct { text: []const u8, cursor: ?Range },
+    /// Insert `text`, replacing the pre-edit if any, else the selection. Ends composition.
+    commit: []const u8,
+    /// Delete `before` and `after` bytes around the selection (text-input-v3, TSF, IBus).
+    delete_surrounding: struct { before: usize, after: usize },
+    /// Replace an explicit range: macOS `replacementRange` (reconversion, autocorrect), TSF.
+    replace: struct { range: Range, text: []const u8 },
+    /// Set the selection (macOS `setMarkedText` selectedRange outside composition, TSF).
+    select: Range,
+    /// An edit command (§7.3), from macOS selectors or fabrum's keymaps.
+    command: EditCommand,
+};
+```
+
+From the app to the input method, the runtime publishes this for the focused text input after
+every frame (§3, `focus.on_text`), and the platform pushes or serves it:
+
+```zig
+pub const TextInputState = struct {
+    /// Surrounding text: the field's text, or a window of it around the selection.
+    /// Capped at 4000 bytes (Wayland's limit is 4 KiB per request), cut on grapheme boundaries.
+    surrounding: []const u8,
+    /// Where `surrounding` starts in the field, in bytes, so IME offsets map back.
+    surrounding_base: usize,
+    selection: Range,          // bytes, within `surrounding`
+    preedit: ?Range,           // bytes, within `surrounding`
+    /// The caret (or pre-edit) rectangle in window points, after scrolling and transforms.
+    caret_rect: Rect,
+    content: ContentType,      // .text, .password, .email, .url, .number, .phone; multiline; spellcheck, autocapitalize hints
+    /// Bumped when the app changes text or selection by itself (setText, undo), so the platform
+    /// resets the IME instead of treating it as the IME's own edit.
+    generation: u64,
+};
+```
+
+**Enabling.** The platform enables the IME when a text input gains focus and disables it when
+focus leaves:
+
+- Wayland: `zwp_text_input_v3.enable`/`disable`, followed by `commit`;
+- macOS: `NSTextInputContext` activation;
+- Windows: TSF document focus or `ImmAssociateContextEx`;
+- X11: `XSetICFocus` / `XUnsetICFocus`.
+
+Password fields set `content = .password`, which disables the IME on platforms that allow it.
+
+**Re-sending the caret rectangle.** The runtime compares `TextInputState` after each frame, and
+calls `platform.textInputChanged(state)` if anything moved. The caret rectangle changes when the
+page scrolls, the layout reflows, a transform animates or the window moves. Without this, the
+candidate window is left behind after scrolling.
+
+| Platform | Pushes or is asked | How |
+|---|---|---|
+| macOS | asked | `firstRectForCharacterRange:` reads the current state; the shell calls `[inputContext invalidateCharacterCoordinates]` when the rectangle moves |
+| Wayland | pushes | `set_cursor_rectangle` + `commit` |
+| Windows | pushes | TSF `OnLayoutChange` / IMM `ImmSetCandidateWindow` |
+| X11 | pushes | the XIM `XNSpotLocation` |
+
+**macOS: `NSTextInputClient`.**
+
+- **Methods implemented:**
+  - `insertText:replacementRange:` → `.commit`, or `.replace`;
+  - `setMarkedText:selectedRange:replacementRange:` → `.preedit`;
+  - `unmarkText` → commit the pre-edit as is;
+  - `hasMarkedText`, `markedRange`, `selectedRange`: answered from the mirror, below;
+  - `attributedSubstringForProposedRange:actualRange:`: answered from the mirror;
+  - `firstRectForCharacterRange:actualRange:` → `caret_rect`, converted to screen coordinates;
+  - `characterIndexForPoint:` → the shaper's hit test (§7.4);
+  - `doCommandBySelector:` → `.command`.
+- **Ranges** are UTF-16 at this edge only. The shell converts using `surrounding`. Ranges
+  outside the window are clamped, and the IME re-asks.
+- **The mirror.** The IME asks synchronously, but the app's state only changes a message later.
+  The platform keeps a mirror of `TextInputState` and applies each `TextInput` to it
+  optimistically while queueing the message. The next frame overwrites the mirror with the real
+  state. Gio does the same.
+
+**Wayland: `zwp_text_input_v3` batching.**
+
+- **Batching in.** The compositor sends `preedit_string`, `commit_string` and
+  `delete_surrounding_text` and then `done(serial)`. The platform buffers everything until
+  `done`, then applies the batch in the order the protocol fixes:
+  1. remove the pre-edit;
+  2. delete surrounding text;
+  3. insert the commit;
+  4. set the new pre-edit.
+
+  The batch is delivered as one sequence of `TextInput` messages in one input pass, so no frame
+  shows half of it.
+- **Batching out.** State is sent as `set_surrounding_text`, `set_cursor_rectangle`,
+  `set_content_type` and then `commit`. The client counts its commits.
+- **Stale batches.** A `done` whose serial is older than the client's commit count reflects
+  stale state. Its edits still apply, as the protocol requires, but its pre-edit cursor is
+  re-validated against the current text.
+
+**Not in `text-input-v3`, and other Linux differences.**
+
+- **Missing from the protocol:**
+  - reconversion of committed text;
+  - a "character at point" query;
+  - IME-driven selection changes;
+  - candidate window placement beyond the cursor rectangle.
+- **Compositors differ:**
+  - GNOME (Mutter, IBus by default) supports `text-input-v3`.
+  - KDE (KWin) relays to fcitx5 or IBus through `input-method-v1`/`v2`, and its support
+    depends on configuration.
+  - wlroots compositors (sway) relay `input-method-v2`, with uneven popup support.
+- **IME frameworks differ:** IBus and fcitx5 disagree on pre-edit cursor semantics and on how
+  much surrounding text they use.
+- **When the compositor offers no `text-input-v3`:** fabrum falls back to xkb compose only, so
+  dead keys still work but there is no CJK input.
+
+**X11.** XIM, through `XOpenIM`/`XCreateIC` in on-the-spot style, with every key event passed
+through `XFilterEvent`. Both IBus and fcitx serve XIM, so it is the most widely available
+choice. winit and Zed use it too. Talking to IBus over D-Bus directly is a later improvement.
+
+**Windows.** TSF is the modern path, with reconversion and surrounding text. IMM32 is simpler
+and enough for CJK candidates. Start with IMM32 and move to TSF.
+
+**Rules that apply on every platform:**
+
+- **A key the IME consumes is not also a key event.**
+  - macOS: if the field had marked text when `keyDown:` began, or `interpretKeyEvents:` resulted
+    in `setMarkedText:`/`unmarkText`, the key is not offered to `Runtime.key`.
+  - Windows: `VK_PROCESSKEY`.
+  - Wayland and X11: the IME grabs the key, and the app never sees it, or `XFilterEvent`
+    returns true.
+
+  This is what keeps Enter that confirms a candidate from also submitting a single-line field.
+  The editor also ignores `insert_newline` while a pre-edit exists, as a second guard.
+- **Focus leaving a composing field commits the pre-edit,** as AppKit's `unmarkText` does,
+  before the field loses focus.
+- **App-side changes cancel composition.** The app changing text or selection by itself bumps
+  `generation`. The platform then discards the marked text (`discardMarkedText`, or
+  `text-input` `disable` followed by `enable`).
+
+### 7.3 Editing behaviour (fabrum, every platform)
+
+**The model** is controlled text in the parent's State, shipped by fabrum as a library type
+("nested TEA"). The parent can set and clear it. The Kitchen does both: the line editor sets
+the heading, then empties itself, which Gio does with `SetText("")`.
 
 ```zig
 pub const TextEditor = struct {              // fabrum.app.TextEditor
     text: std.ArrayList(u8) = .empty,        // UTF-8
-    selection: Selection = .{},              // byte offsets: anchor and head, head is the caret
-    composition: ?Range = null,              // IME marked text, within `text`
-    preferred_x: ?f32 = null,                // column kept by up/down
-    history: History = .{},                  // undo/redo, coalescing typing runs
+    selection: Selection = .{},              // byte offsets on grapheme boundaries: anchor and head (the caret)
+    affinity: enum { upstream, downstream } = .downstream, // which side of a soft wrap the caret is drawn on
+    preedit: ?Preedit = null,                // IME text shown at the caret; not part of `text` until committed
+    preferred_x: ?f32 = null,                // column kept by vertical moves
+    history: History = .{},                  // undo/redo groups
 
-    pub fn apply(self: *TextEditor, gpa: Allocator, input: TextInput, options: Options) Allocator.Error!Outcome;
+    pub fn apply(self: *TextEditor, gpa: Allocator, input: TextInput, env: Env) Allocator.Error!Outcome;
     pub fn setText(self: *TextEditor, gpa: Allocator, text: []const u8) Allocator.Error!void;
     pub fn deinit(self: *TextEditor, gpa: Allocator) void;
 
+    /// What `apply` needs from outside: time for undo coalescing, the clipboard, and the
+    /// geometry for vertical and visual-line moves, which the runtime attaches to each message.
+    pub const Env = struct { now: Io.Timestamp, options: Options, geometry: ?*const TextGeometry };
+    pub const Options = struct { single_line: bool = false, submit: bool = false, max_len: ?usize = null };
     pub const Outcome = struct { changed: bool, submitted: bool, selection_changed: bool };
 };
 ```
 
-- **Offsets** are UTF-8 byte offsets on grapheme boundaries. UTF-16 appears only at the macOS
-  IME edge, converted by the platform. Gio uses rune offsets plus an index, which fabrum doesn't
-  need, because it stores UTF-8.
-- **Two kinds of text input.** Edits arrive as `TextInput` messages, separate from `KeyEvent`, as
-  Gio separates `EditEvent` from `key.Event`:
-
-```zig
-pub const TextInput = union(enum) {
-    insert: []const u8,                                    // typed or committed by the IME
-    set_marked: struct { text: []const u8, selected: Range, replace: ?Range },
-    unmark,
-    replace: struct { range: Range, text: []const u8 },   // IME reconversion, autocorrect
-    select: struct { range: Range, granularity: enum { char, word, line } }, // pointer and IME
-    command: TextCommand,                                  // move, delete, newline, select_all, ...
-    paste: []const u8,
-    copy, cut,
-};
-
-pub const TextCommand = union(enum) {
-    move: struct { by: Unit, direction: Direction, extend: bool },   // Unit: char, word, line, line_edge, page, document
-    delete: struct { by: Unit, direction: Direction },
-    insert_newline, insert_tab, select_all, cancel,
-};
-```
-
-**Who turns keys into commands?**
-
-- **macOS:** the platform does. `interpretKeyEvents:` calls `doCommandBySelector:` with
-  `moveWordLeft:`, `deleteBackward:`, `moveToBeginningOfLine:` and so on, which honours the
-  user's key bindings. The shell maps those selectors to `TextCommand`.
-- **Other platforms:** a default keymap in `fabrum.app` does the same from `KeyEvent`s.
-- **Either way,** `update` only ever sees `TextCommand`s.
-
-**Pointer selection.** Pointer presses and drags on an editor become `.select` inputs:
-
-- The runtime computes the text offset under the pointer from the last frame's text content and
-  box (see Layout below).
-- It honours the click count: double-click selects a word, triple-click a line.
-- `update` therefore never needs geometry.
-
-**Kitchen line editor:**
+**Kitchen usage.** The line editor and the 200-point notes editor:
 
 ```zig
 pub const State = struct {
-    heading: std.ArrayList(u8),          // owned; was a literal in the first screen
+    heading: std.ArrayList(u8),          // owned; a literal in the first screen
     line: app.TextEditor = .{},
     notes: app.TextEditor = .{},
-    pub fn deinit(...) ...
+    // deinit frees all three
 };
 pub const Msg = union(enum) { line: app.TextInput, notes: app.TextInput, ... };
 
 pub fn update(state: *State, msg: Msg, ctx: *app.Update(Kitchen)) !void {
     switch (msg) {
         .line => |input| {
-            const outcome = try state.line.apply(ctx.gpa, input, .{ .single_line = true, .submit = true });
+            const outcome = try state.line.apply(ctx.gpa, input, ctx.textEnv(.{ .single_line = true, .submit = true }));
             if (outcome.submitted) {
                 state.heading.clearRetainingCapacity();
                 try state.heading.appendSlice(ctx.gpa, state.line.text.items);
-                try state.line.setText(ctx.gpa, "");
+                try state.line.setText(ctx.gpa, ""); // bumps `generation`: any composition is discarded
             }
         },
-        .notes => |input| _ = try state.notes.apply(ctx.gpa, input, .{}),
+        .notes => |input| _ = try state.notes.apply(ctx.gpa, input, ctx.textEnv(.{})),
         ...
     }
 }
@@ -500,109 +693,280 @@ try app.widgets.textField(ui, "line", &state.line, .{
 try app.widgets.textArea(ui, "notes", &state.notes, .{ .on_input = on.handler(.notes), .max_height = 200, .hint = "Hint" });
 ```
 
-**`update` would return `!void`.** `apply` allocates, and the user wants errors explicit, so
-`update` should be allowed to return `!void`. The runtime would return the error from the
-`frame`/`mouse`/`key` call that delivered the message, as `Update.emit` does today with its
-deferred error. This changes the component contract: a `void` `update` stays valid, and `!void`
-becomes allowed. It is an open question (§14).
+- **`update` returns `!void` here.** `apply` allocates, and the user wants errors explicit, so
+  the proposal lets `update` return `!void`. The runtime returns the error from the call that
+  delivered the message. A `void` `update` stays valid. This is an open question (§14).
+- **`ctx.textEnv`** fills in `Env`: the clock, and the field's last-frame `TextGeometry`, which
+  the runtime keeps by the element the message came from.
 
-**A convenience wrapper.** An uncontrolled wrapper component with `on_submit` and
-`clear_on_submit` can come later on top of this. It isn't the primitive.
+- **The pre-edit is kept out of `text`.** The layout draws it at the caret with an underline
+  decoration. So undo, `max_len` and `on_change` never see half-composed text, and committing
+  is one insertion.
+- **Vertical and visual-line moves need line geometry.** The runtime attaches a
+  `TextGeometry` to each message: the last frame's visual line starts and the caret x positions
+  for the field, from §7.4. `update` doesn't query the layout itself, but `apply` can still move
+  by visual line.
 
-### Read-only selection
-
-The heading is selectable text. Its selection is interaction state, so it lives in the runtime,
-keyed by element ID, like focus:
-
-```zig
-try ui.selectableText("heading", state.heading.items, theme.font(.h3, theme.foreground));
-```
-
-- Drag and multi-click select, through §5.
-- Cmd-C copies through the clipboard command.
-- Nothing reaches `update`. An optional `on_select` handler can be added if an app ever needs it.
-
-### Layout: text geometry and decorations
-
-Plain functions on `layout.text.Content`, using the same line breaking as drawing:
+**The neutral edit command vocabulary.** It is fed by macOS's selectors and by fabrum's
+keymaps elsewhere:
 
 ```zig
-pub fn caretRect(self: *const Self, width: f32, offset: usize) !Rect;     // relative to the content box
-pub fn offsetAt(self: *const Self, width: f32, point: Vec2) !usize;       // nearest grapheme boundary
-pub fn selectionRects(self: *const Self, width: f32, range: Range, out: []Rect) ![]Rect; // one per line
+pub const EditCommand = union(enum) {
+    move: Move,              // .{ .by = .word, .direction = .backward, .extend = true }
+    delete: struct { by: Unit, direction: Direction },
+    insert_newline,          // Enter: newline in multi-line fields, submit in single-line ones
+    insert_line_break,       // Shift-Enter: newline even where Enter submits (if allowed)
+    insert_tab, insert_backtab,
+    select_all, select_word, select_paragraph,
+    undo, redo,
+    copy, cut, paste,
+    paste_primary,           // X11/Wayland middle-click
+    transpose,               // Ctrl-T (macOS/Emacs)
+    kill_to_line_end,        // Ctrl-K: deletes and saves to the kill buffer
+    yank,                    // Ctrl-Y: inserts the kill buffer
+    cancel,                  // Escape
+
+    pub const Move = struct { by: Unit, direction: Direction, extend: bool = false };
+    pub const Unit = enum {
+        grapheme,
+        word_start,          // Ctrl-Right on Windows: to the start of the next word
+        word_end,            // Option-Right on macOS, Ctrl-Right on GTK: to the end of the word
+        visual_line,         // Up/Down across wrapped lines, keeping preferred_x
+        visual_line_edge,    // Cmd-Left/Right (macOS), Home/End (Windows, Linux)
+        paragraph_edge,      // Ctrl-A/E (macOS/Emacs), Option-Up/Down
+        page,
+        document,            // Cmd-Up/Down (macOS), Ctrl-Home/End
+    };
+    pub const Direction = enum { backward, forward };
+};
 ```
 
-They measure prefixes of a line with the text context, so they work with any renderer's
-measurement. Each line's prefix widths are cached for the frame.
+**macOS: selectors → `EditCommand`, about 45 entries.**
 
-Text content gets optional **decorations**:
+| Selector | `EditCommand` |
+|---|---|
+| `moveLeft:`, `moveRight:` | `.move` by `.grapheme` |
+| `moveWordLeft:`, `moveWordRight:` | `.move` by `.word_end` |
+| `moveToBeginningOfLine:`, `moveToEndOfLine:`, `moveToLeftEndOfLine:` | `.move` by `.visual_line_edge` |
+| `moveToBeginningOfParagraph:`, `moveToEndOfParagraph:` | `.move` by `.paragraph_edge` (Ctrl-A, Ctrl-E) |
+| `moveUp:`, `moveDown:` | `.move` by `.visual_line` |
+| `pageUp:`, `pageDown:` | `.move` by `.page` |
+| `moveToBeginningOfDocument:`, `moveToEndOfDocument:` | `.move` by `.document` |
+| each `...AndModifySelection:` variant | the same, with `.extend = true` |
+| `deleteBackward:`, `deleteForward:` | `.delete` by `.grapheme` |
+| `deleteWordBackward:` | `.delete` by `.word_end`, backward |
+| `deleteToBeginningOfLine:` | `.delete` by `.visual_line_edge`, backward (Cmd-Backspace) |
+| `deleteToEndOfParagraph:` | `.kill_to_line_end` (Ctrl-K) |
+| `yank:` | `.yank` (Ctrl-Y) |
+| `insertNewline:` | `.insert_newline` |
+| `insertLineBreak:` | `.insert_line_break` |
+| `insertTab:`, `insertBacktab:` | `.insert_tab`, `.insert_backtab` |
+| `cancelOperation:` | `.cancel` |
+| `selectAll:` | `.select_all` |
+| `transpose:` | `.transpose` |
+
+Because they come through `interpretKeyEvents:`, they honour the user's `DefaultKeyBinding.dict`.
+
+Cmd-C, X, V, Z, Shift-Z and A are menu key equivalents, not `interpretKeyEvents:` output. The
+shell gets a standard Edit menu whose actions (`copy:`, `paste:`, `undo:` ...) become
+`EditCommand`s for the focused field, and shortcuts otherwise. The Kitchen shell has no Edit
+menu yet; it is part of stage 1.
+
+**Windows and Linux: fabrum's tables, `KeyEvent` → `EditCommand`, per platform.**
+
+| Keys | Windows | Linux (GTK/Qt conventions) |
+|---|---|---|
+| Ctrl-Left / Ctrl-Right | `.word_start` | `.word_end` forward, `.word_start` backward |
+| Home / End | visual line edge (Ctrl: document) | the same |
+| Ctrl-Backspace / Ctrl-Delete | delete word | delete word |
+| Ctrl-A, C, X, V, Z | select all, copy, cut, paste, undo | the same |
+| Redo | Ctrl-Y | Ctrl-Shift-Z (Ctrl-Y too) |
+| Shift-Insert, Ctrl-Insert, Shift-Delete | paste, copy, cut | paste, copy, cut |
+| Shift + any move | extends | extends |
+
+Apps can replace the table through a provided `app.Keymap` context.
+
+**Words.** Word boundaries are UAX #29's (§7.5). A "word" for movement skips whitespace and
+punctuation runs, as the platforms do, so Option-Right from `foo|, bar` lands after `bar`, not
+after `,`.
+
+**Graphemes.**
+
+- Every offset the editor stores is a grapheme boundary.
+- Backspace and Delete remove a whole grapheme, so `é` (`e` + U+0301) and 👨‍👩‍👧 (7 code
+  points, 18 bytes) each go in one keypress.
+- AppKit deletes some Indic and Thai clusters by code point on backspace. This is deferred,
+  and listed in §14.
+
+**Visual lines.**
+
+- Up and Down move between *visual* (wrapped) lines at `preferred_x`.
+- Home and End, and Cmd-Left/Right on macOS, go to the visual line's edges.
+- At a soft wrap the same offset is both the end of one line and the start of the next.
+  `affinity` records which one the caret shows: upstream after End, downstream after Home or a
+  click at the start of the next line.
+
+**Selection.**
+
+- Shift with any move, or Shift-click, extends from the anchor.
+- Double-click selects a word and triple-click a paragraph. Dragging after a double-click
+  extends by words, and after a triple-click by paragraphs.
+- Select-all.
+- The pointer path reaches the editor as `.select` inputs with a granularity (§5 click counts).
+
+**Undo.**
+
+- Groups are coalesced: consecutive typed commits extend the current group. A group ends when:
+  - the caret moves by itself;
+  - a different kind of edit happens (delete vs insert, paste, IME commit);
+  - more than 1 s passes between keystrokes (`Env.now`, so tests control it);
+  - typing passes whitespace after a word, as macOS does.
+- Each group restores the selection it had.
+- Redo is cleared by a new edit.
+
+**Clipboard.**
+
+- `copy`, `cut` and `paste` go through the platform clipboard commands (§11). The read is
+  asynchronous, which Wayland requires.
+- X11 and Wayland also have a **primary selection**:
+  - selecting text offers it (`wp_primary_selection_v1` on Wayland, `PRIMARY` on X11);
+  - a middle-click pastes it at the pointer (`paste_primary`).
+
+  It is optional, Linux-only, and off on other platforms.
+- **Pasting multi-line text into a single-line field** replaces each run of CR and LF with one
+  space. It never submits.
+
+**Bidirectional text** is explicitly deferred (stage 4): until then lines are laid out and
+navigated left to right.
+
+### 7.4 Text geometry comes from the shaper
+
+- **Caret positions and hit-testing must match the glyphs as drawn,** so they come from the
+  renderer's shaper. Kerning, ligatures and combining marks make prefix-width sums wrong.
+- **Line breaking stays in `layout`**, using `measureText`, as today.
+- **The renderer draws each line as one run,** so positions within a line are exactly the
+  shaper's.
+
+Today a text context provides only `measureText(text, style) !Vec2`. A `layout.text.Content(...)`
+context gains three optional declarations:
+
+```zig
+/// Vertical metrics of `line` as drawn: ascent, descent and leading, and its advance width.
+pub fn lineMetrics(self, line: []const u8, style: Style) !LineMetrics;
+/// The caret x, from the line's start, before each byte offset in `offsets` (grapheme
+/// boundaries, ascending), written to `out`. Batched: one shaping per line.
+pub fn caretPositions(self, line: []const u8, style: Style, offsets: []const usize, out: []f32) !void;
+/// The grapheme boundary nearest `x` in `line`, and whether `x` fell on its leading or trailing half.
+pub fn offsetAtX(self, line: []const u8, style: Style, x: f32) !struct { offset: usize, trailing: bool };
+```
+
+**Core Text implementation, in the Quartz renderer:**
+
+- `CTLineCreateWithAttributedString` for the line, cached with the existing measurement cache;
+- `CTLineGetTypographicBounds` for metrics;
+- `CTLineGetOffsetForStringIndex` for caret x;
+- `CTLineGetStringIndexForPosition` for hit-testing.
+
+UTF-8 ↔ UTF-16 index conversion stays inside the renderer's `.m`.
+
+**Fallback.** `HeuristicContent` implements the three by summing per-character estimates, so
+tests run without a renderer. A context that lacks them gets the same fallback, built on
+`measureText` of prefixes.
+
+**What layout builds on top:**
+
+- `Content.caretRect(width, offset, affinity)`;
+- `Content.offsetAt(width, point)`, which picks the visual line by y, then calls `offsetAtX`;
+- `Content.selectionRects(width, range)`;
+- `Content.visualLines(width)`, for `TextGeometry`.
+
+All of these are pure, given the context.
+
+**Decorations.** Text content gains:
 
 - `selection: ?Range` and `selection_color`;
-- `caret: ?usize` and `caret_color`, null while the caret blinks off;
-- `composition: ?Range`, drawn underlined.
+- `caret: ?Caret`, null while the caret blinks off;
+- `preedit: ?Preedit`, the IME text drawn at the caret, underlined, with its cursor range.
 
-The render command iterator emits them as **plain rectangle commands**:
+The render command iterator emits them as plain rectangle commands, after layout when the width
+is known:
 
-- selection rectangles *before* the text;
-- the caret and the composition underline *after* it.
+- selection rectangles before the text;
+- the caret and the underline after it.
 
-Renderers therefore need no change. They are emitted after layout, when the width is known.
+Renderers need no change.
 
-### IME (macOS: `NSTextInputClient` in the shell's view)
+**Read-only selection.** The selectable heading (`ui.selectableText`) uses the same geometry
+and decorations. Its selection is interaction state, keyed by element ID in the runtime, like
+focus. Cmd-C copies it, and nothing reaches `update`.
 
-- **Why a mirror.** The IME asks questions synchronously: `markedRange`, `selectedRange`,
-  `attributedSubstringForProposedRange:`, `firstRectForCharacterRange:` and
-  `characterIndexForPoint:`. The app's state only changes a message later. So the runtime keeps
-  a **mirror** of the focused text input.
-- **What the view publishes.** `textField`/`textArea` publish this every frame through the
-  element's `focus.on_text`:
-  - the text, or for big documents a window around the selection;
-  - the selection and the composition;
-  - the caret rectangle in window coordinates, transform included.
-- **Answering and applying.** The platform answers the IME from the mirror. It applies each
-  `TextInput` to the mirror optimistically while queueing it as a message, as Gio's
-  `editorState.Replace` does. The next frame then overwrites the mirror with the real state.
-- **Cancelling composition.** The runtime calls the platform's "discard marked text" when the
-  app changes the text or selection itself, for example `setText("")` on submit.
-- **`keyDown:`** goes to `interpretKeyEvents:`. That results in:
-  - `insertText:` → `.insert`;
-  - `setMarkedText:` → `.set_marked`;
-  - `doCommandBySelector:` → `.command` when a text input is focused, else a `KeyEvent`.
+**Caret blink.** The runtime owns the blink phase of the focused field:
 
-  `Runtime.key` still sees the raw `KeyEvent` first, for shortcuts and the `keys` filter.
-- **Unimplemented queries.** Unlike Gio, which returns `NSNotFound` for
-  `characterIndexForPoint:`, fabrum can implement it with `offsetAt`.
+- 0.5 s on and 0.5 s off;
+- restarted by any input;
+- stopped after 10 s idle, as Gio does, to save frames.
 
-### Clipboard
+It schedules a wake at the next flip (§8). No messages are involved.
 
-`update` uses commands:
+### 7.5 Unicode segmentation
 
-- `ctx.clipboard.write(text)` copies;
-- `ctx.clipboard.read(on.handler(.pasted))` reads asynchronously, which Wayland requires. On
-  macOS the platform answers at once.
+Editing needs grapheme cluster and word boundaries (UAX #29). Bidi (UAX #9) comes later. Zig's
+`std` has neither.
 
-The editor handles copy, cut and paste itself: it asks the runtime to write its selection, and a
-paste arrives as `.paste`. So editors need no app code for the clipboard.
+| Option | Licence | Coverage | Size and cost | Verdict |
+|---|---|---|---|---|
+| **zg** (codeberg.org/atman/zg, v0.18.0, Unicode 18) | MIT | `Graphemes` and `Words` (UAX #29), normalisation, case, display width; no bidi | **Builds unchanged on Zig 0.17**, which I checked. A ReleaseSmall probe with `Graphemes` and `Words` is 247 KB against a 165 KB empty program, so about 80 KB of tables and code. Its module system pulls in only what is imported. The source repo is large (42 MB of UCD data), and its build generates tables with one extra dependency, `unicoder` | **Recommended** |
+| ziglyph | MIT | graphemes, words | archived, and superseded by zg (same author lineage) | no |
+| Generate our own tables from UCD | Unicode licence (permissive) | exactly what is needed | the smallest, perhaps 10–20 KB, but fabrum would maintain codegen and the rules | only if zg becomes a burden |
+| Delegate to the platform | — | macOS: `CFStringGetRangeOfComposedCharactersAtIndex`, `CFStringTokenizer`; Windows: `ScriptBreak`/ICU in Windows 10+; Linux: ICU | free on macOS and Windows, but **ICU on Linux is about 30 MB**, and results differ between platforms and test runs | no for segmentation; yes for shaping and bidi |
 
-### Caret blink
+**Recommendation.**
 
-The runtime owns the blink phase of the focused editor:
+- Depend on zg for graphemes and words. It is used by `layout.text` (snapping hit-tests to
+  graphemes) and by `app.TextEditor` (moves and deletes).
+- Make it a **lazy** dependency of fabrum, fetched only by builds that use text editing, if
+  Zig's lazy dependencies can express that cleanly. Otherwise make it a normal one.
+- The tests check sample strings from UAX #29's test files: ZWJ emoji, combining marks, Hangul
+  jamo and regional-indicator flags.
+- **Bidi is deferred.** When it comes:
+  - macOS: Core Text already resolves bidi in `CTLine`, and `CTLineGetOffsetForStringIndex`
+    returns the secondary caret offset for split carets.
+  - Elsewhere: SheenBidi (Apache-2.0, small C) for UAX #9 plus the platform shaper (DirectWrite,
+    HarfBuzz). Avoid FriBidi (LGPL) for static linking.
 
-- The caret is visible for 0.5 s and hidden for 0.5 s, restarted by any input.
-- It stops after 10 s idle, as Gio's does, which saves frames.
-- It sets the content's `caret` decoration and schedules a wake at the next flip (§8).
+### 7.6 Edge-case checklist, one test each
 
-No messages are involved.
+Most of these run in `app.testing` (§12), which models the platform contract: keys the IME
+consumed are not delivered, `TextInput` batches arrive as the platform sends them, a fake
+clipboard and a fake clock. The rest are shell or renderer unit tests.
 
-### Gaps
+| # | Edge case | Expected | Test |
+|---|---|---|---|
+| 1 | Enter confirms an IME candidate in the single-line field | The candidate is committed; the field does **not** submit; the heading is unchanged | harness: `preedit("にほん")`, then `commit("日本")` with Enter consumed by the IME (no key event), so heading unchanged; and the second guard: `command(.insert_newline)` while a pre-edit is active, so nothing is submitted |
+| 2 | Candidate window after scrolling | `caret_rect` moves with the scroll; the platform is told | harness with a fake platform: focus the notes editor, `scroll` the page by 100, so `textInputState().caret_rect.y` drops by 100 and one `textInputChanged` is recorded |
+| 3 | Byte vs grapheme offsets | No stored offset is ever inside a grapheme; UTF-16 conversion is correct | harness: type `e\u{301}x`, Left twice → offset 0, not 2; shell unit test: UTF-8 ↔ UTF-16 ranges over `a𝄞é` (surrogate pair, combining mark) |
+| 4 | Deleting a combining sequence and a ZWJ emoji | One Backspace removes `e\u{301}`; one removes 👨‍👩‍👧 (18 bytes) | harness `command(.{ .delete = .{ .by = .grapheme, .direction = .backward } })` |
+| 5 | Dead key + space | Produces the accent itself (`´`) | macOS: harness `preedit("´")` then `commit("´")`; Linux: platform unit test of the xkb compose state with `dead_acute`, `space` → `´` |
+| 6 | Arrow key repeat | Each repeat is one move; Wayland's client-side repeat follows rate and delay | harness `press(.left, .{ .repeat = 3 })` moves 4 graphemes; Wayland platform unit test with a fake clock: delay 600 ms, rate 25/s, 1 s held = 1 + 10 repeats, none after release or `leave` |
+| 7 | Shortcuts on non-Latin layouts | Cmd/Ctrl-C copies on a Russian layout | harness: `KeyEvent{ .physical = .key_c, .key = .{ .char = 'с' }, .modifiers = .shortcut }` with the harness's "ASCII layout" mapping, so the clipboard holds the selection |
+| 8 | Multi-line paste into the single-line field | `a\nb\r\nc` becomes `a b c`; no submit | harness fake clipboard + `command(.paste)` |
+| 9 | Undo coalescing of typing | `hello world` typed in one burst undoes in two groups (`world`, then `hello `); a pause of over 1 s splits a group | harness `type_`, `advance`, `command(.undo)` |
+| 10 | Focus leaving a composing field | The pre-edit is committed, not lost | harness: `preedit("か")`, click elsewhere, so the text is `か` |
+| 11 | App clears a composing field (submit then `setText("")`) | Composition is cancelled; `generation` bumps; the platform is told to discard | harness with a fake platform |
+| 12 | Caret at a soft wrap | End shows the caret at the end of the first line; Home on the next line at its start | layout unit test of `caretRect` with both affinities; harness moves |
+| 13 | Option-character on macOS with an Alt shortcut declared | Typing wins when `interpretKeyEvents:` produced text | shell-level scripted test through `interpretKeyEvents:` |
+| 14 | AltGr on Windows | Types the character; no Ctrl+Alt shortcut fires | Windows platform unit test (later) |
+| 15 | Hit-testing matches drawing | A click at the shaper's x for offset *n* lands on *n*, ligatures and kerning included | Quartz renderer unit test: `offsetAtX(caretPositions(n)) == n` over `office` (ﬃ) and `AVATAR` (kerning) |
 
-- **Grapheme segmentation.** `std` has none. Options:
-  - start with code points plus combining marks;
-  - or generate a compact table from Unicode's `GraphemeBreakProperty`.
+### 7.7 Stages
 
-  This is an open question.
-- **Bidi** and ligature-aware caret positions are out of scope. Lines are measured as left to
-  right runs.
+| Stage | Scope | Kitchen result |
+|---|---|---|
+| **1. Left-to-right editing, no full IME** | zg; shaper caret API (Quartz and the heuristic); layout geometry and decorations; `TextEditor` with grapheme-correct carets, words, visual lines, selection, clipboard, undo coalescing; `EditCommand`; macOS selector table and Edit menu; Windows and Linux keymap tables (unit-tested, with no shell yet); focus, blink; `textField`/`textArea`; the selectable heading. **Includes the minimum of `NSTextInputClient`** (`insertText:`, `doCommandBySelector:`, and `setMarkedText:`/`unmarkText` for dead keys), because on macOS even typing an accent goes through marked text. | **Both editors usable**: typing, accents, moves, selection, copy and paste, undo; Enter in the line editor sets the heading |
+| **2. IME on macOS** | The full `NSTextInputClient` (`firstRect`, `attributedSubstring`, `characterIndexForPoint`, replacement and reconversion), the mirror, `generation` and discard, caret-rect invalidation on scroll; checked by hand with Kotoeri and Pinyin | Japanese and Chinese input, candidate window at the caret |
+| **3. Other platforms' IME** | With each shell: Wayland `text-input-v3` (batching, surrounding text, enable and disable), X11 XIM, Windows IMM32 then TSF; xkb compose; Wayland client-side repeat | Same Kitchen on Linux and Windows |
+| **4. Bidi** | UAX #9 resolution, visual vs logical movement, split carets; Core Text first, SheenBidi elsewhere | Arabic and Hebrew in both editors |
+
 
 ## 8. Animation and timed frames
 
@@ -779,7 +1143,7 @@ pub const Surface = union(enum) {
 - `Runtime.mouse(MouseEvent)` (today).
 - `Runtime.scroll(ScrollEvent)`.
 - `Runtime.key(KeyEvent) bool`, which returns whether it was handled.
-- `Runtime.text(TextInput)`.
+- `Runtime.text(TextInput)`, which delivers a `text-input-v3` batch as one sequence (§7.2).
 - `Runtime.windowFocus(bool)`, which cancels pointer gestures and hides the caret.
 
 **Answers out**
@@ -796,7 +1160,7 @@ pub const Surface = union(enum) {
 - `wakeAt(?Timestamp)`;
 - `setCursor`;
 - `clipboardWrite(text)` and `clipboardRead(callback)`;
-- `imeDiscardMarkedText`, `imeCaretMoved`;
+- `textInputChanged(TextInputState)`: enable/disable, surrounding text, caret rectangle, content type, and `generation` for discarding composition (§7.2);
 - `runOnMain`.
 
 **Automation, for debug scripts and tests**
@@ -1003,9 +1367,14 @@ same treatment: one helper per platform-neutral entry point, then a frame.
 ```zig
 // keys and text
 pub fn press(self: *Self, key: Key, modifiers: Modifiers) !void;   // press + release through Runtime.key
-pub fn type_(self: *Self, text: []const u8) !void;                 // one .insert per grapheme, as a keyboard would
-pub fn compose(self: *Self, marked: []const u8, commit: ?[]const u8) !void; // IME: set_marked ..., then insert
-pub fn command(self: *Self, cmd: app.TextCommand) !void;           // what macOS's selectors produce
+pub fn type_(self: *Self, text: []const u8) !void;                 // one .commit per grapheme, as a keyboard would
+pub fn preedit(self: *Self, text: []const u8, cursor: ?Range) !void; // an IME pre-edit, as the platform sends it
+pub fn commit(self: *Self, text: []const u8) !void;                // an IME commit; the key that confirmed it isn't delivered
+pub fn textInputBatch(self: *Self, inputs: []const app.TextInput) !void; // a text-input-v3 `done` batch, in one pass
+pub fn command(self: *Self, cmd: app.EditCommand) !void;           // what macOS's selectors or a keymap produce
+pub fn keymap(self: *Self, platform: enum { macos, windows, linux }) void; // which built-in table maps keys to commands
+pub fn layout(self: *Self, ascii: fn (PhysicalKey) ?u21) void;     // a non-Latin layout's ASCII fallback, for shortcuts
+pub fn textInputState(self: *Self) ?app.TextInputState;            // what the platform would tell the IME
 pub fn focusedElement(self: *Self) ?layout.Unit.Id;
 pub fn expectFocused(self: *Self, id: layout.Unit.Id) !void;
 
@@ -1025,6 +1394,7 @@ pub fn animating(self: *Self) bool;                        // whether the last f
 
 // clipboard
 pub var clipboard: []const u8;                             // a fake platform clipboard the harness owns
+pub fn platformCalls(self: *Self) []const FakePlatform.Call; // textInputChanged, discard, clipboard: a recording fake platform
 ```
 
 Visibility needs care with scrolling. "Clicking a text" has to mean clicking where it is
@@ -1047,7 +1417,7 @@ instead of clicking a point that hit-tests elsewhere.
 - **Text.**
   - Double-clicking a word selects it.
   - `Cmd-C` puts the selection in the fake clipboard.
-  - `compose("に", "日本")` leaves "日本" and no composition.
+  - The fifteen edge cases of §7.6, each one test.
   - `command(.{ .move = .{ .by = .word, ... } })` lands on word boundaries.
   - Undo restores the text.
 - **Dragging.**
@@ -1110,8 +1480,8 @@ Shell-level unit tests for the UTF-16 ↔ UTF-8 range conversion run without a w
 5. **Default focus on click for buttons:** off, as on macOS, or on, as on Windows and the web?
 6. **Built-in scrollbar** drawn by the runtime, styled by context (proposed), or scrollbars
    always app-drawn from `ui.scrollInfo`?
-7. **Grapheme segmentation:** code points plus combining marks first, or a generated Unicode
-   table now?
+7. **Unicode segmentation:** take zg (MIT, about 80 KB, builds on 0.17) as fabrum's first
+   external dependency (recommended, §7.5), or generate fabrum's own tables?
 8. **Timers as view subscriptions (`ui.every`) (proposed), or commands from `update`
    (`ctx.after`)?** Subscriptions vanish with the view that declared them. Commands survive
    until they fire.
@@ -1149,10 +1519,13 @@ Shell-level unit tests for the UTF-16 ↔ UTF-8 range conversion run without a w
 
   Mitigation: implement it against Japanese (Kotoeri) and Pinyin early in Phase B, with shell
   unit tests for the range conversion.
-- **Text geometry by prefix measurement** costs O(n) measurements per line. Mitigations: cache
-  prefix widths per line per frame, and let Quartz measure a whole line once with `CTLine` and
-  return every glyph's offset. That would be a renderer-provided fast path behind
-  `Context.measureOffsets`, if available.
+- **The shaper API** (§7.4) adds three functions to every text context. Renderers without
+  them fall back to prefix measurement, which is wrong under kerning and ligatures. Quartz gets
+  the real one first; ThorVG needs its own.
+- **Linux IME varies by compositor and IME framework** (GNOME, KDE and wlroots; IBus and fcitx5,
+  §7.2). Each needs testing by hand, and some setups give no CJK input at all.
+- **Platform conventions for deletion** (AppKit deletes some Indic and Thai clusters by code
+  point) are deferred. Grapheme deletion is right for Latin, CJK and emoji.
 - **One-frame staleness** of `ScrollInfo` and the scrollbar when content changes. It converges
   on the next frame, which the runtime requests. It is visible only as a one-frame thumb jump.
 - **The renderer contract grows** with fills, transforms, paths and decorations. Each needs a
@@ -1175,10 +1548,9 @@ it is testable without a window.
 | 4 | **Dragging:** `on_pointer`, capture, slop, cancel, click counts; `Runtime.windowFocus`; cursors | Slider and its value | Harness `drag`: 0.75, clamping, cancel on focus loss |
 | 5 | **Scrolling:** `Unit.content_size`, clipped-axis sizing, culling (layout); `scroll` option, offsets by ID, `Runtime.scroll` with chaining, latching and fling, `ScrollInfo`, `ctx.scrollTo`/`scrollIntoView`, built-in scrollbar (app); macOS phases and momentum (shell) | The page scrolls, with a scrollbar and a draggable thumb | Harness `scroll`/`scrollInfo`: clamping, chaining, latching, thumb drag; layout content-size tests |
 | 6 | **Keys and focus:** `focus`, `KeyEvent`, `Runtime.key` returning handled, Tab order, shortcuts, Space/Enter activation, focus rings; macOS `keyDown:`/`flagsChanged:` | Radio buttons and buttons by keyboard; focus rings | Harness `press`, `expectFocused`: Tab cycle, activation on release, unhandled keys return false |
-| 7 | **Text geometry:** `caretRect`, `offsetAt`, `selectionRects`, text decorations as rectangle commands (layout) | — | layout unit tests over `HeuristicContent` and Quartz text |
-| 8 | **Text editing:** `app.TextEditor`, `TextInput`/`TextCommand`, default keymap, `textField`/`textArea` widgets, blink, clipboard commands, `update` returning `!void` (if agreed) | Line editor sets the heading on Enter; the 200-point notes editor scrolls to the caret | Harness `type_`, `press`, `command`, fake clipboard: submit, word moves, undo, copy and paste, caret blink |
-| 9 | **IME:** runtime mirror, `textInputState`, macOS `NSTextInputClient` | Japanese and Chinese input in both editors | Harness `compose`; shell UTF-16 conversion tests; a scripted `type=` through `interpretKeyEvents:` |
-| 10 | **Read-only selection:** `ui.selectableText` | Selectable heading, Cmd-C | Harness drag-select and double-click, fake clipboard |
-| 11 | **Disabled scope** (if agreed) | `--disable` and the switch through fabrum instead of the app's context | Harness: no focus, keys, scroll or click inside disabled subtrees |
+| 7 | **Text, stage 1 (§7.7):** zg; the shaper caret API in the text context (Quartz, heuristic); layout geometry and decorations; `TextEditor`, `TextInput`, `EditCommand`; macOS selector table, Edit menu, minimal `NSTextInputClient` (commits, commands, dead-key marked text); Windows and Linux keymap tables; blink; clipboard; `textField`/`textArea`; `ui.selectableText`; `update` returning `!void` (if agreed) | **Both editors usable**: the line editor sets the heading on Enter; the 200-point notes editor scrolls to the caret; the heading is selectable | §7.6 cases 3, 4, 6–9, 12, 15; harness `type_`, `press`, `command`, fake clipboard and clock; Quartz shaper tests |
+| 8 | **Text, stage 2:** the full `NSTextInputClient`, mirror, `generation`, caret-rect invalidation | Japanese and Chinese input in both editors | §7.6 cases 1, 2, 5, 10, 11, 13; shell UTF-16 range tests; checked by hand with Kotoeri and Pinyin |
+| 9 | **Text, stages 3–4** come with the Linux and Windows shells (`text-input-v3`, XIM, IMM32/TSF, xkb compose, Wayland repeat), then bidi | — | §7.6 cases 5, 6 and 14 on those platforms |
+| 10 | **Disabled scope** (if agreed) | `--disable` and the switch through fabrum instead of the app's context | Harness: no focus, keys, scroll or click inside disabled subtrees |
 
 Linux (X11 and Wayland) and Windows shells come after Phase B, against the same contract.
