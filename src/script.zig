@@ -14,6 +14,10 @@
 //!   `setMarkedText:` and `insertText:`;
 //! - `return=<key>`: Return in a native field, through its field editor;
 //! - `slide=<key>:<value>`: moves a native slider and sends its action;
+//! - `select=<key>:<index>`: chooses an item of a native dropdown or radio
+//!   group; `step=<key>:<n>`: steps a native stepper `n` up (or down);
+//! - `answermenu=<id>`, `answermenu=`: chooses an item of the popup menu
+//!   being shown (`Update.menu`), or dismisses it;
 //! - `tab`, `backtab`: Tab and Shift-Tab through AppKit's own key-view
 //!   routing, from wherever focus is;
 //! - `space`: Space on the canvas, which clicks a focused drawn element;
@@ -118,6 +122,15 @@ pub fn Script(comptime App: type) type {
                     const split = try keyed(arg);
                     automation.slide(try self.handle(split.key), try std.fmt.parseFloat(f64, split.value));
                 },
+                .select => |arg| {
+                    const split = try keyed(arg);
+                    automation.select(try self.handle(split.key), try std.fmt.parseInt(usize, split.value, 10));
+                },
+                .step => |arg| {
+                    const split = try keyed(arg);
+                    automation.step(try self.handle(split.key), try std.fmt.parseInt(i32, split.value, 10));
+                },
+                .answermenu => |id| try automation.answerPopup(if (id.len == 0) null else try std.fmt.parseInt(usize, id, 10)),
                 .tab => automation.tab(true),
                 .backtab => automation.tab(false),
                 .space => App.activate(self.gui),
@@ -204,20 +217,22 @@ pub fn Script(comptime App: type) type {
                 theme.accent.r, theme.accent.g, theme.accent.b, theme.font_size, theme.control_height, theme.full_keyboard_access, theme.dark,
             });
             std.debug.print("focus: AppKit {s}; fabrum {?}\n", .{ automation.describeFocus(&buffer), self.gui.runtime.focused() });
+            const damage = self.gui.backend.canvas_damage.stats;
+            std.debug.print("canvas layers presented {d}, of which unchanged and not redrawn {d}\n", .{ damage.presented, damage.skipped });
             const records = self.gui.runtime.reconciler().records;
             for (records.keys(), records.values()) |id, record| {
                 std.debug.print("native {x} {t}", .{ id, record.spec });
                 if (record.frame) |f| std.debug.print(" frame=({d},{d} {d}x{d})", .{ f.x, f.y, f.w, f.h });
-                switch (record.spec) {
-                    .text_field => std.debug.print(" text=\"{s}\" composing={}", .{
+                if (record.spec.isTextInput()) {
+                    std.debug.print(" text=\"{s}\" composing={}", .{
                         automation.fieldText(record.handle, &buffer),
                         self.gui.backend.backend().composing(record.handle),
-                    }),
-                    else => switch (record.shown) {
-                        .toggle => |on| std.debug.print(" on={}", .{on}),
-                        .number => |n| std.debug.print(" value={d}", .{n}),
-                        else => {},
-                    },
+                    });
+                } else switch (record.shown) {
+                    .toggle => |on| std.debug.print(" on={}", .{on}),
+                    .number => |n| std.debug.print(" value={d}", .{n}),
+                    .selection => |i| std.debug.print(" selected={?d}", .{i}),
+                    else => {},
                 }
                 std.debug.print("\n", .{});
             }
@@ -267,7 +282,7 @@ pub fn LayoutFile(comptime App: type) type {
         const Text = App.Runtime.Text;
         const Hybrid = @import("kitchen.zig").Hybrid;
 
-        const native_keys = .{ "page", "icon text", "click me", "green", "progress", "transform", "switch", "switched", "slider", "line", "uppercase", "notes", "rating" };
+        const native_keys = .{ "page", "icon text", "click me", "green", "progress", "transform", "switch", "switched", "busy", "slider", "line", "uppercase", "notes", "fruit", "count", "size", "para", "query", "secret", "rating", "open file", "copy heading", "paste notes", "ask", "menu" };
         const drawn_keys = .{ "flat", "strip", "open dialog", "close dialog", "backdrop", "dialog" };
 
         pub fn run(self: *Self) Io.Cancelable!void {
@@ -309,7 +324,7 @@ pub fn LayoutFile(comptime App: type) type {
                     const f = record.frame orelse fabrum.Rect{ .x = 0, .y = 0, .w = 0, .h = 0 };
                     try w.print("native\t{s}\t{d}\t{d}\t{d}\t{d}\t", .{ key, f.x, f.y, f.w, f.h });
                     switch (record.spec) {
-                        .text_field => try w.print("text={s} composing={}", .{
+                        .text_field, .text_area, .search_field, .secure_field => try w.print("text={s} composing={}", .{
                             automation.fieldText(record.handle, &buffer),
                             self.gui.backend.backend().composing(record.handle),
                         }),
@@ -356,6 +371,9 @@ const Step = union(enum) {
     commit: []const u8,
     @"return": []const u8,
     slide: []const u8,
+    select: []const u8,
+    step: []const u8,
+    answermenu: []const u8,
     tab,
     backtab,
     space,

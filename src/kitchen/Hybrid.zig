@@ -14,8 +14,13 @@
 //! - The menu bar has Kitchen > Say Hello (Cmd-K), which shows a native
 //!   alert; its answer comes back as a message.
 //! - The shell: "Open image…" shows the platform's file chooser, "Copy
-//!   heading" and "Paste into notes" use the clipboard, and while the line
-//!   editor has text, closing the window or quitting asks first.
+//!   heading" and "Paste into notes" use the clipboard, "Ask…" asks a
+//!   question in the platform's dialog and "Menu" opens the platform's
+//!   popup menu (both from `update`), and while the line editor has text,
+//!   closing the window or quitting asks first.
+//! - The wider common set: the notes are a native text area; a dropdown,
+//!   a stepper and a spinner (while the switch is on), a radio group, a
+//!   wrapping label, and search and password fields.
 //! - The page scrolls natively: it is an `NSScrollView` whose document
 //!   holds the native controls and a canvas layer for the drawn content,
 //!   laid out by fabrum. A section of rows at the end makes it taller than
@@ -74,13 +79,44 @@ pub const State = struct {
     opened: std.ArrayList(u8) = .empty,
     /// Why the app is asking before closing, while it asks.
     closing: ?app.platform.CloseReason = null,
+    /// The button the question was last answered with, and the menu item
+    /// last chosen (`menu_items`' ids); null before, or when dismissed.
+    asked: ?usize = null,
+    chose: ?usize = null,
+    /// The wider set's values.
+    fruit: ?usize = 0,
+    size: ?usize = null,
+    count: f64 = 2,
+    query: std.ArrayList(u8) = .empty,
+    secret: std.ArrayList(u8) = .empty,
+    searches: usize = 0,
 
     pub fn deinit(self: *State, gpa: Allocator) void {
         self.heading.deinit(gpa);
         self.line.deinit(gpa);
         self.notes.deinit(gpa);
         self.opened.deinit(gpa);
+        self.query.deinit(gpa);
+        self.secret.deinit(gpa);
     }
+};
+
+pub const fruits: []const []const u8 = &.{ "Apple", "Banana", "Cherry" };
+pub const sizes: []const []const u8 = &.{ "Small", "Medium", "Large" };
+pub const paragraph = "A native label wraps within the width its box is given, in the system font and color, as the controls around it read.";
+
+/// The popup menu "Menu" opens: a header, items, a separator, a disabled
+/// item and a submenu.
+pub const menu_items: []const app.platform.MenuItem = &.{
+    .{ .title = "Fruit", .kind = .header },
+    .{ .title = "Apple", .id = 1 },
+    .{ .title = "Banana", .id = 2 },
+    .{ .kind = .separator },
+    .{ .title = "Durian", .id = 3, .enabled = false },
+    .{ .title = "More", .kind = .submenu, .submenu = &.{
+        .{ .title = "Cherry", .id = 4 },
+        .{ .title = "Date", .id = 5 },
+    } },
 };
 
 pub const Msg = union(enum) {
@@ -108,6 +144,16 @@ pub const Msg = union(enum) {
     notes_pasted: ?[]const u8,
     close_requested: app.platform.CloseReason,
     close_answered: usize,
+    ask,
+    asked: ?usize,
+    menu,
+    chose: ?usize,
+    fruit: usize,
+    size: usize,
+    count: f64,
+    query: []const u8,
+    secret: []const u8,
+    search,
 };
 
 /// How many rows the scrolling section has.
@@ -175,6 +221,24 @@ pub fn update(state: *State, msg: Msg, ctx: *app.Update(Hybrid)) !void {
             // "Quit" is the first
             if (button == 0) try ctx.quit();
         },
+        .ask => try ctx.confirm(.{
+            .title = "Really?",
+            .text = "A question asked from update, in the platform's own dialog.",
+            .buttons = &.{ "Yes", "No", "Maybe" },
+        }, ctx.handler(.asked)),
+        .asked => |button| state.asked = button,
+        .menu => {
+            // under the button, as laid out last frame
+            const at: fabrum.Vec2 = if (ctx.core.context.getUnitById(ctx.element("menu"))) |unit| .init(unit.bbox.x, unit.bbox.y + unit.bbox.h) else .zero;
+            try ctx.menu(.{ .items = menu_items, .at = at }, ctx.handler(.chose));
+        },
+        .chose => |id| state.chose = id,
+        .fruit => |i| state.fruit = i,
+        .size => |i| state.size = i,
+        .count => |n| state.count = n,
+        .query => |text| replace(&state.query, gpa, text),
+        .secret => |text| replace(&state.secret, gpa, text),
+        .search => state.searches += 1,
     }
 }
 
@@ -253,6 +317,7 @@ fn page(ui: *app.Ui, state: *const State, theme: *const app.native.Theme) !void 
         try widgets.toggle(ui, "switch", .{ .on = state.switched, .on_change = on.handler(.switched) });
         try ui.text("Example Switch", font(theme, theme.font_size, theme.text));
         try widgets.button(ui, "switched", .{ .label = if (state.switched) "enabled" else "disabled", .on_click = on.bind(.ignore), .enabled = state.switched });
+        if (state.switched) try widgets.spinner(ui, "busy", .{ .size = .small });
     }
     {
         try row(ui);
@@ -278,12 +343,40 @@ fn page(ui: *app.Ui, state: *const State, theme: *const app.native.Theme) !void 
         try row(ui);
         defer ui.close();
         try ui.text("Notes", font(theme, theme.font_size, theme.text));
-        if (ui.hasNativeWidgets()) {
-            try widgets.textField(ui, "notes", .{ .text = state.notes.items, .placeholder = "Anything", .on_change = on.handler(.notes) });
-        } else {
-            // a multi-line area, 60 points tall, scrolling inside
-            try widgets.textArea(ui, "notes", .{ .text = state.notes.items, .placeholder = "Anything", .on_change = on.handler(.notes), .sizing = .{ .width = .grow(.{}), .height = .fixed(60) } });
-        }
+        // a multi-line area, 60 points tall, scrolling inside: NSTextView
+        // on macOS, drawn elsewhere
+        try widgets.textArea(ui, "notes", .{ .text = state.notes.items, .placeholder = "Anything", .on_change = on.handler(.notes), .sizing = .{ .width = .grow(.{}), .height = .fixed(60) } });
+    }
+    {
+        try row(ui);
+        defer ui.close();
+        try ui.text("Choose", font(theme, theme.font_size, theme.text));
+        try widgets.dropdown(ui, "fruit", .{ .items = fruits, .selected = state.fruit, .on_select = on.handler(.fruit) });
+        try widgets.stepper(ui, "count", .{ .value = state.count, .min = 0, .max = 9, .on_change = on.handler(.count) });
+        try ui.print(font(theme, theme.font_size, theme.secondary_text), "{s} \u{00d7} {d}, {s}", .{
+            if (state.fruit) |i| fruits[i] else "nothing",
+            state.count,
+            if (state.size) |i| sizes[i] else "any size",
+        });
+    }
+    {
+        try row(ui);
+        defer ui.close();
+        try ui.text("Size", font(theme, theme.font_size, theme.text));
+        try widgets.radioGroup(ui, "size", .{ .items = sizes, .selected = state.size, .on_select = on.handler(.size), .horizontal = true });
+    }
+    {
+        try item(ui);
+        defer ui.close();
+        try widgets.label(ui, "para", .{ .text = paragraph });
+    }
+    {
+        try row(ui);
+        defer ui.close();
+        try ui.text("Search", font(theme, theme.font_size, theme.text));
+        try widgets.searchField(ui, "query", .{ .text = state.query.items, .placeholder = "Search", .on_change = on.handler(.query), .on_submit = on.bind(.search) });
+        try widgets.secureField(ui, "secret", .{ .text = state.secret.items, .placeholder = "Password", .on_change = on.handler(.secret) });
+        try ui.print(font(theme, theme.font_size, theme.secondary_text), "searched {d} times; {d} secret bytes", .{ state.searches, state.secret.items.len });
     }
     {
         try row(ui);
@@ -309,7 +402,13 @@ fn page(ui: *app.Ui, state: *const State, theme: *const app.native.Theme) !void 
         try widgets.button(ui, "open file", .{ .label = "Open image…", .on_click = on.bind(.open_file) });
         try widgets.button(ui, "copy heading", .{ .label = "Copy heading", .on_click = on.bind(.copy_heading) });
         try widgets.button(ui, "paste notes", .{ .label = "Paste into notes", .on_click = on.bind(.paste_notes) });
-        try ui.print(font(theme, theme.font_size, theme.secondary_text), "Opened: {s}", .{if (state.opened.items.len > 0) state.opened.items else "nothing"});
+        try widgets.button(ui, "ask", .{ .label = "Ask\u{2026}", .on_click = on.bind(.ask) });
+        try widgets.button(ui, "menu", .{ .label = "Menu", .on_click = on.bind(.menu) });
+    }
+    {
+        try item(ui);
+        defer ui.close();
+        try ui.print(font(theme, theme.font_size, theme.secondary_text), "Opened: {s}; asked {?d}; chose {?d}", .{ if (state.opened.items.len > 0) state.opened.items else "nothing", state.asked, state.chose });
     }
     try rows(ui, state, theme);
 }

@@ -178,9 +178,14 @@ test "the hybrid screen shows native controls around drawn content" {
 
     try h.expectText("Hello, fabrum");
     try h.expectText("RadioButton1");
-    for ([_][]const u8{ "page", "icon text", "click me", "green", "progress", "transform", "switch", "switched", "slider", "line", "uppercase", "notes", "rating", "say hello" }) |key| {
+    for ([_][]const u8{ "page", "icon text", "click me", "green", "progress", "transform", "switch", "switched", "slider", "line", "uppercase", "notes", "fruit", "count", "size", "para", "query", "secret", "rating", "ask", "menu", "say hello" }) |key| {
         _ = try h.expectWidget(r.native(key));
     }
+    // the notes are a native text area, and the label wraps within the page
+    try testing.expect((try h.expectWidget(r.native("notes"))).spec == .text_area);
+    const para = try h.expectWidget(r.native("para"));
+    try testing.expect(para.frame.?.w <= window_size.x - 32);
+    try testing.expect(para.frame.?.h >= 32);
     // the progress bar is native, at the model's 0.3
     try testing.expectEqual(@as(?f64, 0.3), (try h.expectWidget(r.native("progress"))).spec.progress.value);
     // the page is a scroll view filling the window, and fabrum laid out the
@@ -342,7 +347,7 @@ test "the shell: a file chooser, the clipboard, and asking before quitting with 
     try h.clickNative(r.native("open file"));
     try testing.expectEqualStrings("Choose an image", h.tree.file_requests.items[0].message);
     try h.chooseFile("/tmp/raspios.img");
-    try h.expectText("Opened: /tmp/raspios.img");
+    try h.expectText("Opened: /tmp/raspios.img; asked null; chose null");
 
     try h.typeText(r.native("line"), "News");
     try h.submit(r.native("line"));
@@ -376,6 +381,60 @@ test "Say Hello shows a native alert whose answer comes back as a message" {
     try testing.expectEqual(@as(?usize, 1), h.state().answer);
     try testing.expect(h.widget(r.native("hello")) == null);
     try h.expectText("3 of 5; greeted 1 times, last answer 1");
+}
+
+test "the wider set is native too: the dropdown, stepper and radio group drive the model" {
+    var h = try hybrid();
+    defer h.deinit();
+    try h.frame();
+    const r = h.root();
+
+    try h.expectText("Apple \u{00d7} 2, any size");
+    try h.selectNative(r.native("fruit"), 2);
+    try h.stepNative(r.native("count"), 3);
+    try h.selectNative(r.native("size"), 1);
+    try h.expectText("Cherry \u{00d7} 5, Medium");
+    try testing.expectEqual(@as(?usize, 1), (try h.expectWidget(r.native("size"))).value.selection);
+
+    try h.typeText(r.native("query"), "fabrum");
+    try h.submit(r.native("query"));
+    try h.typeText(r.native("secret"), "hunter2");
+    try h.expectText("searched 1 times; 7 secret bytes");
+
+    // the spinner shows while the switch is on
+    try testing.expect(h.widget(r.native("busy")) == null);
+    try h.clickNative(r.native("switch"));
+    try testing.expect((try h.expectWidget(r.native("busy"))).spec == .spinner);
+}
+
+test "Ask and Menu use the platform's dialog and popup menu, from update" {
+    var h = try hybrid();
+    defer h.deinit();
+    try h.frame();
+    const r = h.root();
+
+    try h.clickNative(r.native("ask"));
+    try testing.expectEqual(@as(usize, 1), h.tree.dialogs.items.len);
+    try testing.expectEqualStrings("Really?", h.tree.dialogs.items[0].title);
+    try testing.expectEqual(@as(usize, 3), h.tree.dialogs.items[0].buttons.len);
+    try h.answerDialog(2);
+    try h.expectText("Opened: nothing; asked 2; chose null");
+
+    try h.clickNative(r.native("menu"));
+    const menu = h.tree.menus.items[0];
+    try testing.expectEqual(@as(usize, 8), menu.items.len);
+    try testing.expectEqual(app.platform.MenuItem.Kind.header, menu.items[0].kind);
+    try testing.expect(!menu.find("Durian").?.enabled);
+    try testing.expectEqual(@as(u8, 1), menu.find("Cherry").?.depth);
+    // under the button
+    const button = (try h.expectWidget(r.native("menu"))).frame.?;
+    try testing.expectApproxEqAbs(button.y + button.h, menu.at.y, 0.01);
+    try h.chooseMenuItem(4);
+    try h.expectText("Opened: nothing; asked 2; chose 4");
+    // dismissed: null
+    try h.clickNative(r.native("menu"));
+    try h.chooseMenuItem(null);
+    try h.expectText("Opened: nothing; asked 2; chose null");
 }
 
 // The hybrid screen with drawn widgets, as the `none` platform shows it
@@ -511,6 +570,41 @@ test "the drawn page scrolls, by the wheel and by its scrollbar, and what scroll
     const thumb = h.findElement(r.element(app.ui_internal.ThumbKey{ .container = page.id, .axis = .y })).?.bbox;
     try h.drag(.init(thumb.x + 2, thumb.y + 2), .init(thumb.x + 2, 0), 6);
     try testing.expectEqual(0, h.scrollInfo(page).?.offset.y);
+}
+
+test "the wider set is drawn without native widgets, and the dialog and menu are drawn too" {
+    var h: HybridHarness = try .init(.{}, .{ .viewport = window_size, .widgets = .drawn, .services = .basic });
+    defer h.deinit();
+    try h.frame();
+    const r = h.root();
+    try testing.expectEqual(@as(usize, 0), h.tree.all().len);
+
+    // the dropdown opens the runtime's drawn menu
+    try h.click("Apple");
+    try h.click("Cherry");
+    try h.click("+");
+    try h.click("Large");
+    try h.expectText("Cherry \u{00d7} 3, Large");
+    // the label wraps within the page
+    const para = h.findElement(r.element("para")).?.bbox;
+    try testing.expect(para.w <= window_size.x - 32);
+    try testing.expect(para.h >= 30);
+    // the secure field shows bullets
+    try h.clickElement(drawnField(&h, "secret"));
+    try h.type_("abc");
+    try h.expectNoText("abc");
+    try h.expectText("searched 0 times; 3 secret bytes");
+
+    // Ask: the drawn dialog, answered by its button; Menu: the drawn
+    // popup, with its submenu's items shown indented
+    try h.click("Ask\u{2026}");
+    try h.expectText("A question asked from update, in the platform's own dialog.");
+    try h.click("Maybe");
+    try h.expectText("Opened: nothing; asked 2; chose null");
+    try h.click("Menu");
+    try h.expectText("Durian");
+    try h.click("Date");
+    try h.expectText("Opened: nothing; asked 2; chose 5");
 }
 
 test "an overlay without the page lets clicks between widgets through" {
