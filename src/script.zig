@@ -234,8 +234,9 @@ pub fn Script(comptime App: type) type {
 /// - `focus <AppKit's first responder> <fabrum's focus>`;
 /// - `element <key> <x> <y> <w> <h>`: a drawn element, or a native
 ///   element's box;
-/// - `native <key> <x> <y> <w> <h> <value>`: a native view's frame and what
-///   it shows;
+/// - `native <key> <x> <y> <w> <h> <value>`: a native view's frame, in its
+///   parent's coordinates (the page's content, for those in it), and what
+///   it shows; for the page, its scroll offset and content size;
 /// - `text <x> <y> <w> <h> <text>`: drawn text.
 ///
 /// The file is replaced whole, so readers never see half of it.
@@ -251,7 +252,7 @@ pub fn LayoutFile(comptime App: type) type {
         const Text = App.Runtime.Text;
         const Hybrid = @import("kitchen.zig").Hybrid;
 
-        const native_keys = .{ "icon text", "click me", "green", "progress", "transform", "switch", "switched", "slider", "line", "uppercase", "notes", "rating" };
+        const native_keys = .{ "page", "icon text", "click me", "green", "progress", "transform", "switch", "switched", "slider", "line", "uppercase", "notes", "rating" };
         const drawn_keys = .{ "flat", "strip", "open dialog", "close dialog", "backdrop", "dialog" };
 
         pub fn run(self: *Self) Io.Cancelable!void {
@@ -279,6 +280,16 @@ pub fn LayoutFile(comptime App: type) type {
                 inline for (drawn_keys ++ native_keys) |key| try element(w, context, key, root.element(key));
                 inline for (.{ Hybrid.Choice.r1, Hybrid.Choice.r2, Hybrid.Choice.r3 }) |choice| try element(w, context, @tagName(choice), root.element(choice));
                 const records = self.gui.runtime.reconciler().records;
+                for (0..Hybrid.row_count) |i| {
+                    const index: u8 = @intCast(i);
+                    var name: [16]u8 = undefined;
+                    try element(w, context, try std.fmt.bufPrint(&name, "row {d}", .{i}), root.element(Hybrid.RowKey{ .row = index }));
+                    const pick: Hybrid.PickKey = .{ .pick = index };
+                    try element(w, context, try std.fmt.bufPrint(&name, "pick {d}", .{i}), root.element(pick));
+                    if (records.getPtr(root.native(pick))) |record| if (record.frame) |f| {
+                        try w.print("native\tpick {d}\t{d}\t{d}\t{d}\t{d}\ttitle={s}\n", .{ i, f.x, f.y, f.w, f.h, record.spec.button.title });
+                    };
+                }
                 inline for (native_keys) |key| if (records.getPtr(root.native(key))) |record| {
                     const f = record.frame orelse fabrum.Rect{ .x = 0, .y = 0, .w = 0, .h = 0 };
                     try w.print("native\t{s}\t{d}\t{d}\t{d}\t{d}\t", .{ key, f.x, f.y, f.w, f.h });
@@ -288,6 +299,10 @@ pub fn LayoutFile(comptime App: type) type {
                             self.gui.backend.backend().composing(record.handle),
                         }),
                         .button => |b| try w.print("title={s} enabled={}", .{ b.title, b.enabled }),
+                        .scroll_view => try w.print("scroll={d},{d} content={d}x{d}", .{
+                            record.scroll.x,                    record.scroll.y,
+                            if (record.content) |c| c.x else 0, if (record.content) |c| c.y else 0,
+                        }),
                         else => switch (record.shown) {
                             .toggle => |on| try w.print("on={}", .{on}),
                             .number => |n| try w.print("value={d}", .{n}),

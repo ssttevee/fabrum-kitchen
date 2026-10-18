@@ -178,16 +178,51 @@ test "the hybrid screen shows native controls around drawn content" {
 
     try h.expectText("Hello, fabrum");
     try h.expectText("RadioButton1");
-    for ([_][]const u8{ "icon text", "click me", "green", "progress", "transform", "switch", "switched", "slider", "line", "uppercase", "notes", "rating", "say hello" }) |key| {
+    for ([_][]const u8{ "page", "icon text", "click me", "green", "progress", "transform", "switch", "switched", "slider", "line", "uppercase", "notes", "rating", "say hello" }) |key| {
         _ = try h.expectWidget(r.native(key));
     }
     // the progress bar is native, at the model's 0.3
     try testing.expectEqual(@as(?f64, 0.3), (try h.expectWidget(r.native("progress"))).spec.progress.value);
-    // fabrum laid out the native views inside the window
+    // the page is a scroll view filling the window, and fabrum laid out the
+    // native views in its content, which is taller than the window
+    const page = try h.expectWidget(r.native("page"));
+    try testing.expectEqual(fabrum.Rect.init(0, 0, window_size.x, window_size.y), page.frame.?);
+    try testing.expect(page.content_size.?.y > window_size.y);
     for (h.tree.all()) |w| if (w.frame) |frame| {
-        try testing.expect(frame.x >= 0 and frame.x + frame.w <= window_size.x);
-        try testing.expect(frame.y >= 0 and frame.y + frame.h <= window_size.y);
+        if (w.handle == page.handle) continue;
+        try testing.expectEqual(page.handle, w.parent.?);
+        try testing.expect(frame.x >= 0 and frame.x + frame.w <= page.content_size.?.x);
+        try testing.expect(frame.y >= 0 and frame.y + frame.h <= page.content_size.?.y);
     };
+}
+
+test "the page scrolls natively, and what scrolled into view is clicked where it is shown" {
+    var h = try hybrid();
+    defer h.deinit();
+    try h.frame();
+    const r = h.root();
+    const page = r.native("page");
+    const last = Hybrid.PickKey{ .pick = Hybrid.row_count - 1 };
+    const before = (try h.expectWidget(r.native(last))).frame.?;
+    try testing.expect(before.y > window_size.y);
+
+    try h.scrollNative(page, .init(0, 1e6));
+    const scrolled = (try h.expectWidget(page)).scroll;
+    try testing.expectEqual((try h.expectWidget(page)).content_size.?.y - window_size.y, scrolled.y);
+    // the last row's button is in the window now, and hasn't moved in the page
+    try testing.expectEqual(before, (try h.expectWidget(r.native(last))).frame.?);
+    const shown = h.findElement(r.element(last)).?.bbox;
+    try testing.expect(shown.y >= 0 and shown.y + shown.h <= window_size.y);
+    try h.clickNative(r.native(last));
+    try testing.expectEqual(@as(?u8, Hybrid.row_count - 1), h.state().picked);
+    // and a drawn row, clicked where it is shown
+    try h.click("Row 20");
+    try testing.expectEqual(@as(?u8, 20), h.state().selected);
+    // drawn in the page's own canvas layer
+    const scene = h.runtime.scene();
+    try testing.expectEqual(@as(usize, 1), scene.containers.len);
+    const layer = scene.layers[scene.containers[0].slots[0].canvas];
+    try testing.expectEqual(fabrum.Vec2.init(0, -scrolled.y), layer.offset);
 }
 
 test "native buttons, checkboxes, switches and sliders drive the model" {
@@ -275,7 +310,8 @@ test "the drawn dialog is a canvas layer above the native line editor" {
     var h = try hybrid();
     defer h.deinit();
     try h.frame();
-    try testing.expectEqual(@as(usize, 1), h.runtime.scene().layers.len);
+    // the host's canvas, and the page's, in its scroll view
+    try testing.expectEqual(@as(usize, 2), h.runtime.scene().layers.len);
 
     try h.clickNative(h.root().native("line"));
     try h.typeText(h.root().native("line"), "typing");
@@ -286,14 +322,15 @@ test "the drawn dialog is a canvas layer above the native line editor" {
     try h.tab();
     try h.expectFocused(h.root().element("close dialog"));
     const scene = h.runtime.scene();
-    try testing.expectEqual(@as(usize, 2), scene.layers.len);
-    try testing.expectEqual(app.native.Scene.Slot{ .canvas = 1 }, scene.slots[scene.slots.len - 1]);
-    const line = (try h.expectWidget(h.root().native("line"))).frame.?;
-    try testing.expect(scene.layers[1].hits(.init(line.x + line.w / 2, line.y + line.h / 2)));
+    // a third, at the top of the host, over the page and the field in it
+    try testing.expectEqual(@as(usize, 3), scene.layers.len);
+    try testing.expectEqual(app.native.Scene.Slot{ .canvas = 2 }, scene.slots[scene.slots.len - 1]);
+    const line = h.findElement(h.root().element("line")).?.bbox;
+    try testing.expect(scene.layers[2].hits(.init(line.x + line.w / 2, line.y + line.h / 2)));
 
     try h.click("Close");
     try testing.expect(!h.state().dialog);
-    try testing.expectEqual(@as(usize, 1), h.runtime.scene().layers.len);
+    try testing.expectEqual(@as(usize, 2), h.runtime.scene().layers.len);
 }
 
 test "Say Hello shows a native alert whose answer comes back as a message" {

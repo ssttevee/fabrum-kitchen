@@ -13,6 +13,10 @@
 //!   change what was typed, which is written back without breaking typing.
 //! - The menu bar has Kitchen > Say Hello (Cmd-K), which shows a native
 //!   alert; its answer comes back as a message.
+//! - The page scrolls natively: it is an `NSScrollView` whose document
+//!   holds the native controls and a canvas layer for the drawn content,
+//!   laid out by fabrum. A section of rows at the end makes it taller than
+//!   the window: each row is drawn and clickable, with a native button.
 //!
 //! On a platform without native controls, such as `none`, `app.widgets`
 //! draws them, and the same screen is entirely drawn (`kitchen-none`).
@@ -56,6 +60,10 @@ pub const State = struct {
     greetings: usize = 0,
     /// The button the alert was last answered with.
     answer: ?usize = null,
+    /// The row whose native button was pressed last, and the row clicked
+    /// last, in the scrolling section.
+    picked: ?u8 = null,
+    selected: ?u8 = null,
 
     pub fn deinit(self: *State, gpa: Allocator) void {
         self.heading.deinit(gpa);
@@ -80,7 +88,16 @@ pub const Msg = union(enum) {
     close_dialog,
     say_hello,
     answered: usize,
+    pick: u8,
+    select: u8,
 };
+
+/// How many rows the scrolling section has.
+pub const row_count = 24;
+
+/// The keys of a row of the scrolling section, and of its button.
+pub const RowKey = struct { row: u8 };
+pub const PickKey = struct { pick: u8 };
 
 pub const Props = struct {
     /// Whether the page has the window's background. An overlay leaves it
@@ -126,6 +143,8 @@ pub fn update(state: *State, msg: Msg, ctx: *app.Update(Hybrid)) void {
             state.answer = index;
             state.greeting = false;
         },
+        .pick => |index| state.picked = index,
+        .select => |index| state.selected = index,
     }
 }
 
@@ -148,6 +167,27 @@ pub fn view(ui: *app.Ui, state: *const State, props: Props) !void {
         .layout = .{ .sizing = .grow(.{}), .axis = .y },
         .background_color = if (props.page) theme.window_background else .transparent,
     });
+    defer ui.close();
+
+    try page(ui, state, theme);
+
+    try menus.item(ui, "say hello", .{ .menu = "Kitchen", .title = "Say Hello", .key = "k", .on_select = on.bind(.say_hello) });
+    if (state.greeting) try dialogs.alert(ui, "hello", .{
+        .title = "Hello from fabrum",
+        .message = "A native alert, declared by a view and answered with a message.",
+        .buttons = &.{ "OK", "Again" },
+        .on_response = on.handler(.answered),
+    });
+
+    // outside the page's scroll view, so it covers the window
+    if (state.dialog) try dialog(ui, theme);
+}
+
+/// The page, in a native scroll view: the widgets, then rows enough to
+/// scroll.
+fn page(ui: *app.Ui, state: *const State, theme: *const app.native.Theme) !void {
+    const on = ui.messages(Hybrid);
+    try widgets.scrollView(ui, "page", .{ .content = .{ .axis = .y } });
     defer ui.close();
 
     {
@@ -219,16 +259,35 @@ pub fn view(ui: *app.Ui, state: *const State, props: Props) !void {
         }
         try ui.print(font(theme, theme.font_size, theme.secondary_text), "{d:.0} of 5; greeted {d} times, last answer {?d}", .{ state.rating, state.greetings, state.answer });
     }
+    try rows(ui, state, theme);
+}
 
-    try menus.item(ui, "say hello", .{ .menu = "Kitchen", .title = "Say Hello", .key = "k", .on_select = on.bind(.say_hello) });
-    if (state.greeting) try dialogs.alert(ui, "hello", .{
-        .title = "Hello from fabrum",
-        .message = "A native alert, declared by a view and answered with a message.",
-        .buttons = &.{ "OK", "Again" },
-        .on_response = on.handler(.answered),
-    });
-
-    if (state.dialog) try dialog(ui, theme);
+/// The scrolling section: drawn rows that select themselves when clicked,
+/// each with a native button.
+fn rows(ui: *app.Ui, state: *const State, theme: *const app.native.Theme) !void {
+    const on = ui.messages(Hybrid);
+    {
+        try item(ui);
+        defer ui.close();
+        try ui.print(font(theme, 20, theme.text), "Rows: picked {?d}, selected {?d}", .{ state.picked, state.selected });
+    }
+    try ui.open(null, .{ .layout = .{ .sizing = .{ .width = .grow(.{}) }, .axis = .y, .padding = .init(16, 16, 0, 16), .child_gap = 4 } });
+    defer ui.close();
+    for (0..row_count) |i| {
+        const index: u8 = @intCast(i);
+        const key: RowKey = .{ .row = index };
+        const selected = state.selected == index;
+        try ui.open(key, .{
+            .layout = .{ .sizing = .{ .width = .grow(.{}) }, .padding = .init(12, 8, 4, 4), .child_gap = 12, .child_alignment = .center_left },
+            .background_color = if (selected) theme.accent.withAlpha(60) else if (ui.hovered(key)) theme.accent.withAlpha(25) else theme.control_background,
+            .corner_radius = .uniform(6),
+            .on_click = on.bind(.{ .select = index }),
+        });
+        defer ui.close();
+        try ui.print(font(theme, theme.font_size, theme.text), "Row {d}", .{i});
+        ui.spacer();
+        try widgets.button(ui, PickKey{ .pick = index }, .{ .label = if (state.picked == index) "Picked" else "Pick", .on_click = on.bind(.{ .pick = index }) });
+    }
 }
 
 /// The drawn part of the page: a strip with radio buttons that join the
