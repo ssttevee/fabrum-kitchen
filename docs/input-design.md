@@ -1,8 +1,31 @@
 # Input, scrolling, text and animation in fabrum: a design driven by the Kitchen
 
-Status: proposal for review (Phase A). Nothing here is implemented in fabrum yet.
-Written against fabrum trunk `54fcb56`: `ui.messages(C)`, `app.Action = app.Handler(void)`,
-`ui.one`, `app.testing.Harness`.
+Status: proposal for review (Phase A), written against fabrum trunk `54fcb56`:
+`ui.messages(C)`, `app.Action = app.Handler(void)`, `ui.one`, `app.testing.Harness`.
+
+**What became of it (October 2026).** fabrum went hybrid (fabrum's `docs/hybrid-design.md`):
+native controls do their own input on toolkit platforms, and this design applies to **drawn
+widgets**, which the `none` platform and `app.drawn` use. Its drawn parts were built in
+fabrum's portable checkpoint P2 (`hybrid-design.md` §20), on the `hybrid` branches:
+
+| Section | Built in P2 | Not built |
+|---|---|---|
+| 3. Element events | `on_pointer`, `focus`, `scroll` and `cursor` on `Ui.Container` | — |
+| 4. Scrolling | runtime-owned offsets by element ID, wheel routing with chaining and latching, clamping with `content_size`, the overlay thumb and its drag, `scrollInfo`, `scrollTo`, `scrollIntoView`, focus revealing | the runtime's own fling, line-step conversion (hosts send points), virtualised lists |
+| 5. Dragging | capture, press/drag/release/cancel, the threshold cancelling the click, click counts, local coordinates and size, `long_press` from hosts that have it | `Cursor.grab`/`grabbing` |
+| 6. Keys and focus | the full `KeyEvent` (plus `text`), `Focus` with `on_key`, filters, `on_focus`, `on_text`, Tab order, `focusVisible`, `ctx.focus`/`blur`, `ui.shortcut`, the routing order, Space/Enter on release, non-Latin shortcut matching | focus on click for buttons stays off (macOS) |
+| 7.1 Keys to text | the host's: `.none` hosts pass the key's text; X11 keysyms map to keys and text | platform key handling (xkb, `WM_CHAR`) |
+| 7.2 IME | `TextInput.preedit` is accepted and kept out of the text; the second guard (Enter during a pre-edit) | the mirror, `TextInputState`, `firstRect`, `generation` discards (stage 2) |
+| 7.3 Editing | `app.TextEditor`, `EditCommand`, the macOS and Windows/Linux keymaps, graphemes and words from zg, visual-line moves, selection by pointer with word and paragraph granularity, undo coalescing, the clipboard, multi-line paste into a single line, `max_len` | the macOS selector table and Edit menu (AppKit draws no editors yet), the primary selection |
+| 7.4 Text geometry | `TextGeometry` from the layout's lines and prefix widths, `caretRect`, `offsetAt`, `selectionRects`, affinity | the shaper's own `caretPositions`/`offsetAtX` (Core Text's line APIs are a TODO); decorations as render commands (widgets float rectangles instead) |
+| 7.5 Segmentation | zg (`Graphemes`, and `Words` on 64-bit targets) | bidi |
+| 7.6 Checklist | stage 1: 3, 4, 6, 7, 8, 9, 12; 15 partly; 1's second guard | the rest, with stage 2 |
+| 8. Animation | `ui.every`, `ui.after`, `ctx.now()`, the caret blink; off without `Capabilities.animation = .full` | transforms |
+| 11. Platform | became `fabrum.app.platform` with `Services` (dialogs, menus, text entry, choosers, clipboard, quit, close) and `Capabilities`; `.none` hosts give their own | the Linux and Windows shells |
+| 12. Testing | `press`, `hold`, `type_`, `command`, `textInput`, `drag`, `longPress`, `scroll`, `scrollInfo`, `advance`, `expectFocused`, the fake clipboard and services, a capabilities override | `preedit`/`commit`/`textInputState` for drawn fields (stage 2) |
+
+The Kitchen's two editors, its slider and its page work on `.none` (`kitchen-none`, in an
+overlay and an e-ink mode), with tests in `src/kitchen.zig` and `src/none.zig`.
 
 The Kitchen is a port of Gio's Kitchen demo (`gio-example/kitchen/kitchen.go`). It has two jobs:
 

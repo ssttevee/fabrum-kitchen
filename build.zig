@@ -108,7 +108,7 @@ fn addNone(
     const exe = b.addExecutable(.{ .name = "kitchen-none", .root_module = none_mod });
     b.installArtifact(exe);
 
-    const run_step = b.step("run-none", "Build kitchen-none, play its script, and write PNGs to /tmp/kitchen-snapshots/none");
+    const run_step = b.step("run-none", "Build kitchen-none, play its script as an overlay and as an e-ink panel, and write PNGs to /tmp/kitchen-snapshots/p2");
     const run = b.addRunArtifact(exe);
     run.addPassthruArgs();
     run_step.dependOn(&run.step);

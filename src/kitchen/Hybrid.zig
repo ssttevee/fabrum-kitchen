@@ -22,7 +22,10 @@
 //!   the window: each row is drawn and clickable, with a native button.
 //!
 //! On a platform without native controls, such as `none`, `app.widgets`
-//! draws them, and the same screen is entirely drawn (`kitchen-none`).
+//! draws them, and the same screen is entirely drawn (`kitchen-none`):
+//! the drawn editors edit (keys, selection, the clipboard), the notes
+//! become a multi-line area that scrolls inside, the slider drags, and
+//! the page scrolls with a drawn scrollbar.
 //!
 //! `Kitchen.zig` is the same screen drawn entirely by fabrum, for
 //! comparison (`kitchen --drawn`).
@@ -275,7 +278,12 @@ fn page(ui: *app.Ui, state: *const State, theme: *const app.native.Theme) !void 
         try row(ui);
         defer ui.close();
         try ui.text("Notes", font(theme, theme.font_size, theme.text));
-        try widgets.textField(ui, "notes", .{ .text = state.notes.items, .placeholder = "Anything", .on_change = on.handler(.notes) });
+        if (ui.hasNativeWidgets()) {
+            try widgets.textField(ui, "notes", .{ .text = state.notes.items, .placeholder = "Anything", .on_change = on.handler(.notes) });
+        } else {
+            // a multi-line area, 60 points tall, scrolling inside
+            try widgets.textArea(ui, "notes", .{ .text = state.notes.items, .placeholder = "Anything", .on_change = on.handler(.notes), .sizing = .{ .width = .grow(.{}), .height = .fixed(60) } });
+        }
     }
     {
         try row(ui);

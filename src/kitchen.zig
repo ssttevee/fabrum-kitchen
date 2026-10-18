@@ -404,18 +404,113 @@ test "without native controls, the hybrid screen draws them, and they drive the 
     try testing.expectApproxEqAbs(@as(f64, 0.75), h.state().progress, 0.001);
 }
 
+/// The drawn text widgets are components: their field is an element of
+/// the instance declared with the widget's key.
+fn drawnField(h: *HybridHarness, key: []const u8) fabrum.layout.Unit.Id {
+    return h.root().child(app.drawn.TextBox, key).element("field");
+}
+
 test "a drawn line editor takes focus when clicked, and Tab goes on to the radio buttons" {
     var h = try drawnHybrid();
     defer h.deinit();
     try h.frame();
     const r = h.root();
 
-    try h.clickElement(r.element("line"));
-    try h.expectFocused(r.element("line"));
+    try h.clickElement(drawnField(&h, "line"));
+    try h.expectFocused(drawnField(&h, "line"));
     try testing.expect(try h.pressKey(.tab, .{}));
     try h.expectFocused(r.element(Hybrid.Choice.r1));
     try testing.expect(try h.pressKey(.space, .{}));
     try testing.expectEqual(Hybrid.Choice.r1, h.state().choice.?);
+}
+
+test "the drawn line editor is controlled too: typing, Uppercase rewriting it, and Enter setting the heading" {
+    var h = try drawnHybrid();
+    defer h.deinit();
+    try h.frame();
+    const r = h.root();
+    const line = drawnField(&h, "line");
+
+    try h.clickElement(line);
+    try h.type_("Hi there");
+    try testing.expectEqualStrings("Hi there", h.state().line.items);
+    try h.expectText("Hi there");
+    // the model rewrites what was typed, and the field shows it
+    try h.clickElement(r.element("uppercase"));
+    try testing.expectEqualStrings("HI THERE", h.state().line.items);
+    try h.expectText("HI THERE");
+    try h.clickElement(line);
+    try h.type_("!");
+    try testing.expectEqualStrings("HI THERE!", h.state().line.items);
+    // moves, a selection and the clipboard
+    try h.press(.home, .{});
+    try h.press(.right, .{ .shift = true });
+    try h.press(.right, .{ .shift = true });
+    try h.command(.copy);
+    try testing.expectEqualStrings("HI", h.clipboard().?);
+    try h.press(.end, .{});
+    try h.press(.enter, .{});
+    try h.expectText("HI THERE!");
+    try testing.expectEqualStrings("", h.state().line.items);
+    try h.expectText("Hint");
+}
+
+test "the drawn notes area wraps, scrolls inside, and takes a paste" {
+    var h = try drawnHybrid();
+    defer h.deinit();
+    try h.frame();
+    const notes = drawnField(&h, "notes");
+    try h.clickElement(notes);
+    for (0..16) |_| try h.type_("Anything at all, said the cook. ");
+    try testing.expect(std.mem.startsWith(u8, h.state().notes.items, "Anything at all"));
+    const info = h.scrollInfo(notes).?;
+    try testing.expect(info.content.y > info.box.y);
+    try testing.expect(info.offset.y > 0);
+    try h.tree.setClipboard("Pasted");
+    try h.command(.paste);
+    try testing.expect(std.mem.endsWith(u8, h.state().notes.items, "Pasted"));
+}
+
+test "the drawn slider drags" {
+    var h = try drawnHybrid();
+    defer h.deinit();
+    try h.frame();
+    const slider = h.findElement(h.root().child(app.drawn.Slider, "slider").element("slider")).?.bbox;
+    const y = slider.y + slider.h / 2;
+    const at = struct {
+        fn x(box: fabrum.Rect, fraction: f32) f32 {
+            return box.x + 8 + (box.w - 16) * fraction;
+        }
+    }.x;
+    try h.drag(.init(at(slider, 0.3), y), .init(at(slider, 0.6), y), 5);
+    try h.expectText("0.60");
+    try testing.expectApproxEqAbs(@as(f64, 0.6), h.state().progress, 0.01);
+}
+
+test "the drawn page scrolls, by the wheel and by its scrollbar, and what scrolled into view is clicked" {
+    var h = try drawnHybrid();
+    defer h.deinit();
+    try h.frame();
+    const r = h.root();
+    const page = r.element("page");
+    const info = h.scrollInfo(page).?;
+    try testing.expect(info.content.y > window_size.y);
+    const before = h.findElement(r.element(Hybrid.RowKey{ .row = 20 })).?.bbox;
+    try testing.expect(before.y > window_size.y);
+
+    try testing.expect(try h.scroll("Hello, fabrum", .init(0, 1e6)));
+    try testing.expectEqual(info.content.y - window_size.y, h.scrollInfo(page).?.offset.y);
+    const shown = h.findElement(r.element(Hybrid.RowKey{ .row = 20 })).?.bbox;
+    try testing.expect(shown.y >= 0 and shown.y + shown.h <= window_size.y);
+    try h.click("Row 20");
+    try testing.expectEqual(@as(?u8, 20), h.state().selected);
+    try h.clickElement(r.element(Hybrid.PickKey{ .pick = 20 }));
+    try testing.expectEqual(@as(?u8, 20), h.state().picked);
+
+    // the thumb, dragged back to the top
+    const thumb = h.findElement(r.element(app.ui_internal.ThumbKey{ .container = page.id, .axis = .y })).?.bbox;
+    try h.drag(.init(thumb.x + 2, thumb.y + 2), .init(thumb.x + 2, 0), 6);
+    try testing.expectEqual(0, h.scrollInfo(page).?.offset.y);
 }
 
 test "an overlay without the page lets clicks between widgets through" {
