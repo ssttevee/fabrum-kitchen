@@ -9,7 +9,7 @@
 //!
 //! Each target has one native platform, so `native` picks it by OS. Its
 //! Objective-C half and the frameworks it needs are added to the build by
-//! `addMacos` in `build.zig`, so only apps that open a window pay for them.
+//! `addMacosPlatform` in `build.zig`, so only apps that open a window pay for them.
 const builtin = @import("builtin");
 
 pub const macos = @import("platform/macos.zig");
