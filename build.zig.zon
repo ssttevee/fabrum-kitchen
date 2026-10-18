@@ -1,0 +1,20 @@
+.{
+    .name = .fabrum_kitchen,
+    .version = "0.0.0",
+    .fingerprint = 0x52637f29fa42c6cc,
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{
+        .fabrum = .{
+            .path = "../zig-layout",
+        },
+        // Only the macOS GUI uses it.
+        .fabrum_renderer_quartz = .{
+            .path = "../zig-fabrum-renderer-quartz",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
