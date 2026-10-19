@@ -5,15 +5,8 @@ const flate = std.compress.flate;
 /// Encodes `width` by `height` pixels of straight (not premultiplied) RGBA,
 /// rows `stride` bytes apart, as a PNG.
 pub fn encode(gpa: std.mem.Allocator, rgba: []const u8, width: u32, height: u32, stride: u32) ![]u8 {
-    // the image data: each row behind a "no filter" byte, then compressed
-    var raw: std.ArrayList(u8) = .empty;
-    defer raw.deinit(gpa);
-    try raw.ensureTotalCapacity(gpa, @as(usize, height) * (width * 4 + 1));
-    for (0..height) |y| {
-        raw.appendAssumeCapacity(0);
-        raw.appendSliceAssumeCapacity(rgba[y * stride ..][0 .. width * 4]);
-    }
-
+    // the image data: each row behind a "no filter" byte, compressed as
+    // it is written
     var compressed: std.Io.Writer.Allocating = try .initCapacity(gpa, 1 << 16);
     defer compressed.deinit();
     const window = try gpa.alloc(u8, flate.max_window_len);
@@ -21,7 +14,10 @@ pub fn encode(gpa: std.mem.Allocator, rgba: []const u8, width: u32, height: u32,
     const compress = try gpa.create(flate.Compress);
     defer gpa.destroy(compress);
     compress.* = try .init(&compressed.writer, window, .zlib, .level_4);
-    try compress.writer.writeAll(raw.items);
+    for (0..height) |y| {
+        try compress.writer.writeByte(0);
+        try compress.writer.writeAll(rgba[y * stride ..][0 .. width * 4]);
+    }
     try compress.finish();
 
     var out: std.Io.Writer.Allocating = .init(gpa);
@@ -55,4 +51,24 @@ test "a PNG starts with its signature and header, and ends with IEND" {
     try std.testing.expectEqualSlices(u8, "\x89PNG\r\n\x1a\n", encoded[0..8]);
     try std.testing.expectEqualSlices(u8, "IHDR", encoded[12..16]);
     try std.testing.expectEqualSlices(u8, "IEND", encoded[encoded.len - 8 ..][0..4]);
+}
+
+test "the header has the size, and the image data inflates to the rows, each behind a filter byte" {
+    // two rows of two pixels, four bytes of padding after each
+    const pixels = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 0, 0, 0, 0, 9, 10, 11, 12, 13, 14, 15, 16, 0, 0, 0, 0 };
+    const encoded = try encode(std.testing.allocator, &pixels, 2, 2, 12);
+    defer std.testing.allocator.free(encoded);
+    try std.testing.expectEqual(2, std.mem.readInt(u32, encoded[16..20], .big));
+    try std.testing.expectEqual(2, std.mem.readInt(u32, encoded[20..24], .big));
+    try std.testing.expectEqualSlices(u8, &.{ 8, 6, 0, 0, 0 }, encoded[24..29]);
+
+    // the IDAT chunk follows the 25-byte IHDR chunk
+    const idat_len = std.mem.readInt(u32, encoded[33..37], .big);
+    try std.testing.expectEqualSlices(u8, "IDAT", encoded[37..41]);
+    var input: std.Io.Reader = .fixed(encoded[41..][0..idat_len]);
+    var window: [flate.max_window_len]u8 = undefined;
+    var decompress: flate.Decompress = .init(&input, .zlib, &window);
+    var raw: [18]u8 = undefined;
+    try decompress.reader.readSliceAll(&raw);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 0, 9, 10, 11, 12, 13, 14, 15, 16 }, &raw);
 }
