@@ -3,10 +3,10 @@
 Status: proposal for review (Phase A), written against fabrum trunk `54fcb56`:
 `ui.messages(C)`, `app.Action = app.Handler(void)`, `ui.one`, `app.testing.Harness`.
 
-**What became of it (October 2026).** fabrum went hybrid (fabrum's `docs/hybrid-design.md`):
+**What became of it (October 2026).** fabrum went hybrid (fabrum's `docs/hybrid-design.md`, now on `trunk`):
 native controls do their own input on toolkit platforms, and this design applies to **drawn
 widgets**, which the `none` platform and `app.drawn` use. Its drawn parts were built in
-fabrum's portable checkpoint P2 (`hybrid-design.md` §20), on the `hybrid` branches:
+fabrum's portable checkpoint P2 (`hybrid-design.md` §20), on what were then the `hybrid` branches, since merged into `trunk`:
 
 | Section | Built in P2 | Not built |
 |---|---|---|

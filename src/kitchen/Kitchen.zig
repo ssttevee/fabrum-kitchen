@@ -1,8 +1,8 @@
 //! The root component: Gio's Kitchen, a page of every kind of widget.
 //!
-//! This first screen has what fabrum can do today. Still to come, once
-//! fabrum has scrolling, keyboard input, dragging and timed frames (see
-//! `docs/input-design.md`):
+//! This first screen has what fabrum can do on every platform. Still to
+//! come here, some of it already built for drawn widgets on the `none`
+//! platform (see `docs/input-design.md` and `none.zig`):
 //!
 //! - the heading as selectable text, changed by the line editor;
 //! - the multi-line editor, at most 200 points tall, that scrolls inside;
