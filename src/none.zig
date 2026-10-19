@@ -58,14 +58,14 @@ const viewport = kitchen.window_size;
 const theme: app.native.Theme = .{ .window_background = .rgba(236, 236, 236, 200) };
 
 /// How the host shows the Kitchen.
-pub const Mode = enum {
+const Mode = enum {
     /// RGBA over a background, with the page left out so clicks between
     /// widgets go through.
     overlay,
     /// An opaque gray panel, with the page.
     eink,
 
-    fn format(self: Mode) layout.PixelFormat {
+    fn pixelFormat(self: Mode) layout.PixelFormat {
         return switch (self) {
             .overlay => .rgba8_premultiplied,
             .eink => .gray8,
@@ -190,7 +190,7 @@ pub fn main(init: std.process.Init) !void {
         try host.init(gpa, io, mode);
         defer host.deinit();
 
-        try out.print("kitchen-none ({t}): {s} renderer, {d}x{d} {t}, writing to {s}\n", .{ mode, renderer_name, width, height, mode.format(), options.out });
+        try out.print("kitchen-none ({t}): {s} renderer, {d}x{d} {t}, writing to {s}\n", .{ mode, renderer_name, width, height, mode.pixelFormat(), options.out });
         try out.print("{s:<16} {s:>5} {s:>7} {s:>9} {s:>8} {s:>9} {s:>9}  {s:<11} {s}\n", .{ "step", "taken", "regions", "pixels", "frame", "render", "composite", "refresh", "next frame" });
         for (script, 0..) |step, n| {
             const report = try host.play(step);
@@ -267,20 +267,33 @@ const Host = struct {
     damage: std.ArrayList(Rect) = .empty,
 
     fn init(self: *Host, gpa: Allocator, io: Io, mode: Mode) !void {
-        const bytes = mode.format().bytesPerPixel();
+        const bytes = mode.pixelFormat().bytesPerPixel();
+        var renderer: Renderer = try .init(gpa);
+        errdefer renderer.deinit();
+        try renderer.loadFont("Go", @embedFile("fonts/Go-Regular.ttf"));
+        const overlay = try gpa.alignedAlloc(u8, .@"4", pixel_count * bytes);
+        errdefer gpa.free(overlay);
+        const background = try gpa.alloc(u8, pixel_count * 4);
+        errdefer gpa.free(background);
+        const composited = try gpa.alloc(u8, pixel_count * 4);
+        errdefer gpa.free(composited);
+        const full_overlay = try gpa.alignedAlloc(u8, .@"4", pixel_count * bytes);
+        errdefer gpa.free(full_overlay);
+        const full_composited = try gpa.alloc(u8, pixel_count * 4);
+        errdefer gpa.free(full_composited);
         self.* = .{
             .gpa = gpa,
             .io = io,
             .mode = mode,
-            .renderer = try .init(gpa),
+            .renderer = renderer,
             .runtime = undefined,
-            .overlay = try gpa.alignedAlloc(u8, .@"4", pixel_count * bytes),
-            .background = try gpa.alloc(u8, pixel_count * 4),
-            .composited = try gpa.alloc(u8, pixel_count * 4),
-            .full_overlay = try gpa.alignedAlloc(u8, .@"4", pixel_count * bytes),
-            .full_composited = try gpa.alloc(u8, pixel_count * 4),
+            .overlay = overlay,
+            .background = background,
+            .composited = composited,
+            .full_overlay = full_overlay,
+            .full_composited = full_composited,
         };
-        try self.renderer.loadFont("Go", @embedFile("fonts/Go-Regular.ttf"));
+        // the services point into the host, so the runtime is made in place
         self.runtime = try .init(gpa, .{
             .io = io,
             .text_context = self.renderer.text_context,
@@ -303,7 +316,7 @@ const Host = struct {
     }
 
     fn pixels(self: *const Host, buffer: []align(4) u8) layout.Surface.Pixels {
-        return .packed_(buffer, width, height, self.mode.format());
+        return .packed_(buffer, width, height, self.mode.pixelFormat());
     }
 
     const Report = struct {
@@ -512,13 +525,18 @@ const Host = struct {
     /// into `out` within `region` (`out = overlay + background * (1 -
     /// alpha)`), or expands the gray panel to RGB.
     fn composite(self: *const Host, out: []u8, overlay: []const u8, region: Rect) void {
-        const x0: usize = @intFromFloat(@max(region.x, 0));
-        const y0: usize = @intFromFloat(@max(region.y, 0));
-        const x1: usize = @intFromFloat(@min(region.x + region.w, viewport.x));
-        const y1: usize = @intFromFloat(@min(region.y + region.h, viewport.y));
-        for (y0..y1) |y| for (x0..x1) |x| {
+        const span = Span.of(region);
+        if (span.isEmpty()) return;
+        switch (self.mode) {
+            inline else => |mode| self.compositeAs(mode, out, overlay, span),
+        }
+    }
+
+    /// `composite` for one mode, so there is no branch per pixel.
+    fn compositeAs(self: *const Host, comptime mode: Mode, out: []u8, overlay: []const u8, span: Span) void {
+        for (span.y0..span.y1) |y| for (span.x0..span.x1) |x| {
             const i = (y * width + x) * 4;
-            switch (self.mode) {
+            switch (mode) {
                 .overlay => {
                     const a: u32 = overlay[i + 3];
                     for (0..3) |c| out[i + c] = @intCast(@as(u32, overlay[i + c]) + (@as(u32, self.background[i + c]) * (255 - a) + 127) / 255);
@@ -530,6 +548,28 @@ const Host = struct {
                 },
             }
         };
+    }
+};
+
+/// The whole pixels of `region` that are in the viewport: `x0 <= x < x1`,
+/// `y0 <= y < y1`.
+const Span = struct {
+    x0: usize,
+    y0: usize,
+    x1: usize,
+    y1: usize,
+
+    fn of(region: Rect) Span {
+        return .{
+            .x0 = @intFromFloat(std.math.clamp(region.x, 0, viewport.x)),
+            .y0 = @intFromFloat(std.math.clamp(region.y, 0, viewport.y)),
+            .x1 = @intFromFloat(std.math.clamp(region.x + region.w, 0, viewport.x)),
+            .y1 = @intFromFloat(std.math.clamp(region.y + region.h, 0, viewport.y)),
+        };
+    }
+
+    fn isEmpty(self: Span) bool {
+        return self.x1 <= self.x0 or self.y1 <= self.y0;
     }
 };
 
@@ -589,13 +629,10 @@ const pixel_count = width * height;
 
 /// Outlines `region` in red, two pixels wide.
 fn outline(rgba: []u8, region: Rect) void {
-    const x0: usize = @intFromFloat(@max(region.x, 0));
-    const y0: usize = @intFromFloat(@max(region.y, 0));
-    const x1: usize = @intFromFloat(@min(region.x + region.w, viewport.x));
-    const y1: usize = @intFromFloat(@min(region.y + region.h, viewport.y));
-    if (x1 <= x0 or y1 <= y0) return;
-    for (y0..y1) |y| for (x0..x1) |x| {
-        if (x - x0 >= 2 and x1 - x > 2 and y - y0 >= 2 and y1 - y > 2) continue;
+    const span = Span.of(region);
+    if (span.isEmpty()) return;
+    for (span.y0..span.y1) |y| for (span.x0..span.x1) |x| {
+        if (x - span.x0 >= 2 and span.x1 - x > 2 and y - span.y0 >= 2 and span.y1 - y > 2) continue;
         rgba[(y * width + x) * 4 ..][0..4].* = .{ 230, 30, 30, 255 };
     };
 }
