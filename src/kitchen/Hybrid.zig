@@ -384,12 +384,9 @@ fn page(ui: *app.Ui, state: *const State, theme: *const app.native.Theme) !void 
         try ui.text("Rating", font(theme, theme.font_size, theme.text));
         // a widget only AppKit has, and the common one elsewhere, or where
         // the controls are drawn
-        if (comptime app.platform.kind == .appkit) {
-            if (ui.hasNativeWidgets()) {
-                try app.platform.appkit.widgets.levelIndicator(ui, "rating", .{ .value = state.rating, .on_change = on.handler(.rate) });
-            } else {
-                try widgets.slider(ui, "rating", .{ .value = state.rating, .max = 5, .on_change = on.handler(.rate) });
-            }
+        const has_level_indicator = app.platform.kind == .appkit;
+        if (has_level_indicator and ui.hasNativeWidgets()) {
+            try app.platform.appkit.widgets.levelIndicator(ui, "rating", .{ .value = state.rating, .on_change = on.handler(.rate) });
         } else {
             try widgets.slider(ui, "rating", .{ .value = state.rating, .max = 5, .on_change = on.handler(.rate) });
         }
