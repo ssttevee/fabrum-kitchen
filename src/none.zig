@@ -637,6 +637,10 @@ fn outline(rgba: []u8, region: Rect) void {
     };
 }
 
+test {
+    _ = png;
+}
+
 test "the script plays through in both modes, and redrawing the damage always matches a full redraw" {
     for ([_]Mode{ .overlay, .eink }) |mode| {
         var host: Host = undefined;
