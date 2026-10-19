@@ -5,15 +5,18 @@
     .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .fabrum = .{
-            .path = "../zig-layout",
+            .url = "git+https://github.com/ssttevee/fabrum#e44712671c9f53a901e21c03a41bbf0a862a0168",
+            .hash = "fabrum-0.0.0-qj9rbbNSEgAlqbl2HCbV15rQICmASbdPuPykzcOcX7KN",
         },
         // kitchen-none draws with one of these (-Drenderer).
         .fabrum_renderer_z2d = .{
-            .path = "../zig-fabrum-renderer-z2d",
+            .url = "git+https://github.com/ssttevee/fabrum-renderer-z2d#5eb217e1be39c90469a0ca4151b6a7ecc365ce72",
+            .hash = "fabrum_renderer_z2d-0.0.0-HsrDaiZcAAAIHRNYk667KR3pEk-VGe-_BHisiMwEnDFn",
             .lazy = true,
         },
         .fabrum_renderer_thorvg = .{
-            .path = "../zig-fabrum-renderer-thorvg",
+            .url = "git+https://github.com/ssttevee/fabrum-renderer-thorvg#f66f5f98c893a995d2e0513d46b221dffc2d55d0",
+            .hash = "fabrum_renderer_thorvg-0.0.0-i-WXrVleAABVC1HkR3MIfInUIEm2NHZ5_YWLERF5MbPt",
             .lazy = true,
         },
     },
