@@ -20,6 +20,8 @@ const gtk = app.platform.gtk;
 const automation = gtk.automation;
 
 const kitchen = @import("kitchen.zig");
+const Step = @import("script.zig").Step;
+const cut = @import("script.zig").cut;
 
 pub const HybridApp = gtk.App(kitchen.Hybrid);
 
@@ -53,9 +55,11 @@ const Script = struct {
     fn run(self: *Script) Io.Cancelable!void {
         try self.io.sleep(.fromMilliseconds(1200), .awake);
         while (self.steps.next()) |step| {
-            if (std.mem.startsWith(u8, step, "wait=")) {
-                const ms = std.fmt.parseInt(u32, step["wait=".len..], 10) catch 0;
-                try self.io.sleep(.fromMilliseconds(ms), .awake);
+            if (std.mem.cutPrefix(u8, step, "wait=")) |ms| {
+                try self.io.sleep(.fromMilliseconds(std.fmt.parseInt(u32, ms, 10) catch |err| {
+                    std.log.err("script step \"{s}\" failed: {t}", .{ step, err });
+                    continue;
+                }), .awake);
                 continue;
             }
             self.step = step;
@@ -72,66 +76,63 @@ const Script = struct {
         self.perform(self.step) catch |err| std.log.err("script step \"{s}\" failed: {t}", .{ self.step, err });
     }
 
-    fn arg(step: []const u8, name: []const u8) ?[]const u8 {
-        if (!std.mem.startsWith(u8, step, name) or step.len <= name.len or step[name.len] != '=') return null;
-        return step[name.len + 1 ..];
-    }
-
     fn perform(self: *Script, step: []const u8) !void {
-        if (arg(step, "click")) |label| return self.pointAt(label, true);
-        if (arg(step, "hover")) |label| return self.pointAt(label, false);
-        if (arg(step, "press")) |key| return automation.click(try self.handle(key));
-        if (arg(step, "type")) |a| {
-            const split = try keyed(a);
-            return automation.typeText(try self.handle(split.key), split.value);
+        switch (try Step.parse(step)) {
+            .click => |label| try self.pointAt(label, true),
+            .hover => |label| try self.pointAt(label, false),
+            .press => |key| automation.click(try self.handle(key)),
+            .type => |arg| {
+                const key, const text = try cut(arg, ':');
+                automation.typeText(try self.handle(key), text);
+            },
+            .@"return" => |key| automation.newline(try self.handle(key)),
+            .slide => |arg| {
+                const key, const value = try cut(arg, ':');
+                automation.slide(try self.handle(key), try std.fmt.parseFloat(f64, value));
+            },
+            .select => |arg| {
+                const key, const index = try cut(arg, ':');
+                automation.select(try self.handle(key), try std.fmt.parseInt(usize, index, 10));
+            },
+            .step => |arg| {
+                const key, const n = try cut(arg, ':');
+                automation.step(try self.handle(key), try std.fmt.parseInt(i32, n, 10));
+            },
+            .scroll => |arg| {
+                const key, const y = try cut(arg, ':');
+                automation.scrollTo(try self.handle(key), .init(0, try std.fmt.parseFloat(f32, y)));
+            },
+            .tab => automation.tab(true),
+            .backtab => automation.tab(false),
+            .space => HybridApp.activate(self.gui),
+            .menu => |arg| {
+                const menu_name, const item_name = try cut(arg, '/');
+                var menu: [64:0]u8 = undefined;
+                var item: [64:0]u8 = undefined;
+                try automation.chooseMenu(try std.fmt.bufPrintSentinel(&menu, "{s}", .{menu_name}, 0), try std.fmt.bufPrintSentinel(&item, "{s}", .{item_name}, 0));
+            },
+            .answer => |index| automation.answerAlert(try std.fmt.parseInt(usize, index, 10)),
+            .answermenu => |id| try automation.answerPopup(if (id.len == 0) null else try std.fmt.parseInt(usize, id, 10)),
+            .choose => |path| {
+                var buffer: [std.fs.max_path_bytes]u8 = undefined;
+                try automation.answerFileChooser(if (path.len == 0) null else try std.fmt.bufPrintSentinel(&buffer, "{s}", .{path}, 0));
+            },
+            .resize => |size| {
+                const w, const h = try cut(size, 'x');
+                automation.resize(try std.fmt.parseFloat(f64, w), try std.fmt.parseFloat(f64, h));
+            },
+            .hit => |at| {
+                const x, const y = try cut(at, ',');
+                var buffer: [256]u8 = undefined;
+                std.debug.print("hit {s}: {s}\n", .{ at, automation.describeHit(try std.fmt.parseFloat(f64, x), try std.fmt.parseFloat(f64, y), &buffer) });
+            },
+            .dump => self.dump(),
+            .snapshot => |path| try snapshot(path, null),
+            .snapshot2x => |path| try snapshot(path, 2),
+            .quit => automation.runOnMain(quitLater, null),
+            // AppKit's own: events through its window, the IME, the pasteboard
+            .nsclick, .mark, .commit, .key, .privateclipboard, .clipboard, .close => return error.UnsupportedStep,
         }
-        if (arg(step, "return")) |key| return automation.newline(try self.handle(key));
-        if (arg(step, "slide")) |a| {
-            const split = try keyed(a);
-            return automation.slide(try self.handle(split.key), try std.fmt.parseFloat(f64, split.value));
-        }
-        if (arg(step, "select")) |a| {
-            const split = try keyed(a);
-            return automation.select(try self.handle(split.key), try std.fmt.parseInt(usize, split.value, 10));
-        }
-        if (arg(step, "step")) |a| {
-            const split = try keyed(a);
-            return automation.step(try self.handle(split.key), try std.fmt.parseInt(i32, split.value, 10));
-        }
-        if (arg(step, "scroll")) |a| {
-            const split = try keyed(a);
-            return automation.scrollTo(try self.handle(split.key), .init(0, try std.fmt.parseFloat(f32, split.value)));
-        }
-        if (std.mem.eql(u8, step, "tab")) return automation.tab(true);
-        if (std.mem.eql(u8, step, "backtab")) return automation.tab(false);
-        if (std.mem.eql(u8, step, "space")) return HybridApp.activate(self.gui);
-        if (arg(step, "menu")) |a| {
-            const slash = std.mem.indexOfScalar(u8, a, '/') orelse return error.BadStep;
-            var menu: [64:0]u8 = undefined;
-            var item: [64:0]u8 = undefined;
-            return automation.chooseMenu(try std.fmt.bufPrintSentinel(&menu, "{s}", .{a[0..slash]}, 0), try std.fmt.bufPrintSentinel(&item, "{s}", .{a[slash + 1 ..]}, 0));
-        }
-        if (arg(step, "answer")) |index| return automation.answerAlert(try std.fmt.parseInt(usize, index, 10));
-        if (arg(step, "answermenu")) |id| return automation.answerPopup(if (id.len == 0) null else try std.fmt.parseInt(usize, id, 10));
-        if (arg(step, "choose")) |path| {
-            var buffer: [std.fs.max_path_bytes]u8 = undefined;
-            return automation.answerFileChooser(if (path.len == 0) null else try std.fmt.bufPrintSentinel(&buffer, "{s}", .{path}, 0));
-        }
-        if (arg(step, "resize")) |size| {
-            const x = std.mem.indexOfScalar(u8, size, 'x') orelse return error.BadStep;
-            return automation.resize(try std.fmt.parseFloat(f64, size[0..x]), try std.fmt.parseFloat(f64, size[x + 1 ..]));
-        }
-        if (arg(step, "hit")) |at| {
-            const comma = std.mem.indexOfScalar(u8, at, ',') orelse return error.BadStep;
-            var buffer: [256]u8 = undefined;
-            std.debug.print("hit {s}: {s}\n", .{ at, automation.describeHit(try std.fmt.parseFloat(f64, at[0..comma]), try std.fmt.parseFloat(f64, at[comma + 1 ..]), &buffer) });
-            return;
-        }
-        if (std.mem.eql(u8, step, "dump")) return self.dump();
-        if (arg(step, "snapshot")) |path| return snapshot(path, null);
-        if (arg(step, "snapshot2x")) |path| return snapshot(path, 2);
-        if (std.mem.eql(u8, step, "quit")) return automation.runOnMain(quitLater, null);
-        return error.UnknownStep;
     }
 
     fn handle(self: *Script, key: []const u8) error{NoSuchNativeElement}!app.native.Handle {
@@ -184,11 +185,6 @@ const Script = struct {
     }
 };
 
-fn keyed(a: []const u8) error{BadStep}!struct { key: []const u8, value: []const u8 } {
-    const colon = std.mem.indexOfScalar(u8, a, ':') orelse return error.BadStep;
-    return .{ .key = a[0..colon], .value = a[colon + 1 ..] };
-}
-
 fn snapshot(path: []const u8, scale: ?f64) !void {
     var buffer: [std.fs.max_path_bytes]u8 = undefined;
     try automation.snapshot(try std.fmt.bufPrintSentinel(&buffer, "{s}", .{path}, 0), scale);
@@ -200,4 +196,5 @@ fn quitLater(_: ?*anyopaque) callconv(.c) void {
 
 test {
     _ = kitchen;
+    _ = @import("script.zig");
 }

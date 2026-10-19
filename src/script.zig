@@ -78,9 +78,11 @@ pub fn Script(comptime App: type) type {
             // let the window come up
             try self.io.sleep(.fromMilliseconds(800), .awake);
             while (self.steps.next()) |step| {
-                if (std.mem.startsWith(u8, step, "wait=")) {
-                    const ms = std.fmt.parseInt(u32, step["wait=".len..], 10) catch 0;
-                    try self.io.sleep(.fromMilliseconds(ms), .awake);
+                if (std.mem.cutPrefix(u8, step, "wait=")) |ms| {
+                    try self.io.sleep(.fromMilliseconds(std.fmt.parseInt(u32, ms, 10) catch |err| {
+                        std.log.err("script step \"{s}\" failed: {t}", .{ step, err });
+                        continue;
+                    }), .awake);
                     continue;
                 }
                 self.step = step;
@@ -108,54 +110,50 @@ pub fn Script(comptime App: type) type {
                 },
                 .press => |key| automation.click(try self.handle(key)),
                 .type => |arg| {
-                    const split = try keyed(arg);
-                    automation.typeText(try self.handle(split.key), split.value);
+                    const key, const text = try cut(arg, ':');
+                    automation.typeText(try self.handle(key), text);
                 },
                 .mark => |arg| {
-                    const split = try keyed(arg);
-                    automation.mark(try self.handle(split.key), split.value);
+                    const key, const text = try cut(arg, ':');
+                    automation.mark(try self.handle(key), text);
                 },
                 .commit => |arg| {
-                    const split = try keyed(arg);
-                    automation.commit(try self.handle(split.key), split.value);
+                    const key, const text = try cut(arg, ':');
+                    automation.commit(try self.handle(key), text);
                 },
                 .@"return" => |key| automation.newline(try self.handle(key)),
                 .slide => |arg| {
-                    const split = try keyed(arg);
-                    automation.slide(try self.handle(split.key), try std.fmt.parseFloat(f64, split.value));
+                    const key, const value = try cut(arg, ':');
+                    automation.slide(try self.handle(key), try std.fmt.parseFloat(f64, value));
                 },
                 .select => |arg| {
-                    const split = try keyed(arg);
-                    automation.select(try self.handle(split.key), try std.fmt.parseInt(usize, split.value, 10));
+                    const key, const index = try cut(arg, ':');
+                    automation.select(try self.handle(key), try std.fmt.parseInt(usize, index, 10));
                 },
                 .step => |arg| {
-                    const split = try keyed(arg);
-                    automation.step(try self.handle(split.key), try std.fmt.parseInt(i32, split.value, 10));
+                    const key, const n = try cut(arg, ':');
+                    automation.step(try self.handle(key), try std.fmt.parseInt(i32, n, 10));
                 },
                 .answermenu => |id| try automation.answerPopup(if (id.len == 0) null else try std.fmt.parseInt(usize, id, 10)),
                 .scroll => |arg| {
-                    const split = try keyed(arg);
-                    automation.scrollTo(try self.handle(split.key), .init(0, try std.fmt.parseFloat(f32, split.value)));
+                    const key, const y = try cut(arg, ':');
+                    automation.scrollTo(try self.handle(key), .init(0, try std.fmt.parseFloat(f32, y)));
                 },
                 .tab => automation.tab(true),
                 .backtab => automation.tab(false),
                 .space => App.activate(self.gui),
-                .key => |name| {
-                    if (std.mem.eql(u8, name, "tab")) {
-                        automation.windowKey(48, "\t", false);
-                    } else if (std.mem.eql(u8, name, "backtab")) {
-                        automation.windowKey(48, "\t", true);
-                    } else if (std.mem.eql(u8, name, "space")) {
-                        automation.windowKey(49, " ", false);
-                    } else return error.UnknownKey;
+                .key => |name| switch (std.meta.stringToEnum(enum { tab, backtab, space }, name) orelse return error.UnknownKey) {
+                    .tab => automation.windowKey(48, "\t", false),
+                    .backtab => automation.windowKey(48, "\t", true),
+                    .space => automation.windowKey(49, " ", false),
                 },
                 .menu => |arg| {
-                    const slash = std.mem.indexOfScalar(u8, arg, '/') orelse return error.BadStep;
+                    const menu_name, const item_name = try cut(arg, '/');
                     var menu: [64:0]u8 = undefined;
                     var item: [64:0]u8 = undefined;
                     try automation.chooseMenu(
-                        try std.fmt.bufPrintSentinel(&menu, "{s}", .{arg[0..slash]}, 0),
-                        try std.fmt.bufPrintSentinel(&item, "{s}", .{arg[slash + 1 ..]}, 0),
+                        try std.fmt.bufPrintSentinel(&menu, "{s}", .{menu_name}, 0),
+                        try std.fmt.bufPrintSentinel(&item, "{s}", .{item_name}, 0),
                     );
                 },
                 .answer => |index| automation.answerAlert(try std.fmt.parseInt(usize, index, 10)),
@@ -170,16 +168,16 @@ pub fn Script(comptime App: type) type {
                 },
                 .close => automation.runOnMain(closeLater, null),
                 .resize => |size| {
-                    const x = std.mem.indexOfScalar(u8, size, 'x') orelse return error.BadStep;
-                    automation.resize(try std.fmt.parseFloat(f64, size[0..x]), try std.fmt.parseFloat(f64, size[x + 1 ..]));
+                    const w, const h = try cut(size, 'x');
+                    automation.resize(try std.fmt.parseFloat(f64, w), try std.fmt.parseFloat(f64, h));
                 },
                 .dump => self.dump(),
                 .hit => |at| {
-                    const comma = std.mem.indexOfScalar(u8, at, ',') orelse return error.BadStep;
+                    const x, const y = try cut(at, ',');
                     var buffer: [256]u8 = undefined;
                     std.debug.print("hit {s}: {s}\n", .{ at, automation.describeHit(
-                        try std.fmt.parseFloat(f64, at[0..comma]),
-                        try std.fmt.parseFloat(f64, at[comma + 1 ..]),
+                        try std.fmt.parseFloat(f64, x),
+                        try std.fmt.parseFloat(f64, y),
                         &buffer,
                     ) });
                 },
@@ -367,7 +365,10 @@ pub fn LayoutFile(comptime App: type) type {
     };
 }
 
-const Step = union(enum) {
+/// A step of the script, parsed by name: the names are the fields, and
+/// those with an argument take what follows `=`. The GTK Kitchen plays the
+/// steps it has an equivalent for.
+pub const Step = union(enum) {
     click: []const u8,
     hover: []const u8,
     nsclick: []const u8,
@@ -398,15 +399,13 @@ const Step = union(enum) {
     snapshot2x: []const u8,
     quit,
 
-    fn parse(step: []const u8) error{UnknownStep}!Step {
+    pub fn parse(step: []const u8) error{UnknownStep}!Step {
         inline for (@typeInfo(Step).@"union".field_names) |field| {
             if (comptime @FieldType(Step, field) == void) {
                 if (std.mem.eql(u8, step, field)) return @field(Step, field);
             }
         }
-        const eq = std.mem.indexOfScalar(u8, step, '=') orelse return error.UnknownStep;
-        const name = step[0..eq];
-        const arg = step[eq + 1 ..];
+        const name, const arg = std.mem.cutScalar(u8, step, '=') orelse return error.UnknownStep;
         inline for (@typeInfo(Step).@"union".field_names) |field| {
             if (comptime @FieldType(Step, field) == []const u8) {
                 if (std.mem.eql(u8, name, field)) return @unionInit(Step, field, arg);
@@ -416,10 +415,10 @@ const Step = union(enum) {
     }
 };
 
-/// `<key>:<value>`, split at the first colon.
-fn keyed(arg: []const u8) error{BadStep}!struct { key: []const u8, value: []const u8 } {
-    const colon = std.mem.indexOfScalar(u8, arg, ':') orelse return error.BadStep;
-    return .{ .key = arg[0..colon], .value = arg[colon + 1 ..] };
+/// A step's argument split at the first `separator`: `<key>:<value>`,
+/// `<menu>/<item>`, `<width>x<height>`.
+pub fn cut(arg: []const u8, separator: u8) error{BadStep}!struct { []const u8, []const u8 } {
+    return std.mem.cutScalar(u8, arg, separator) orelse error.BadStep;
 }
 
 fn snapshot(path: []const u8, scale: ?f64) !void {
@@ -440,7 +439,9 @@ test "steps parse by name" {
     try std.testing.expectEqualStrings("/tmp/a=b.png", (try Step.parse("snapshot=/tmp/a=b.png")).snapshot);
     try std.testing.expectEqual(Step.quit, try Step.parse("quit"));
     try std.testing.expectEqual(Step.tab, try Step.parse("tab"));
-    const typed = try keyed((try Step.parse("type=line:a:b")).type);
-    try std.testing.expectEqualStrings("line", typed.key);
-    try std.testing.expectEqualStrings("a:b", typed.value);
+    const key, const text = try cut((try Step.parse("type=line:a:b")).type, ':');
+    try std.testing.expectEqualStrings("line", key);
+    try std.testing.expectEqualStrings("a:b", text);
+    try std.testing.expectError(error.BadStep, cut("800", 'x'));
+    try std.testing.expectError(error.UnknownStep, Step.parse("fly=away"));
 }
