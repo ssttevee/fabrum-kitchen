@@ -2,6 +2,9 @@
 
 Status: proposal for review (Phase A), written against fabrum trunk `54fcb56`:
 `ui.messages(C)`, `app.Action = app.Handler(void)`, `ui.one`, `app.testing.Harness`.
+This is a historical design record; its proposed APIs and build options below
+are not current usage instructions. See [the README](../README.md) for the
+current build, run and test commands.
 
 **What became of it (October 2026).** fabrum went hybrid (fabrum's `docs/hybrid-design.md`, now on `trunk`):
 native controls do their own input on toolkit platforms, and this design applies to **drawn
@@ -1449,11 +1452,15 @@ instead of clicking a point that hit-tests elsewhere.
 - **Transforms.** With Transform on and the clock advanced, clicking the *transformed* position
   of "Click me!" toggles it, and its untransformed position doesn't.
 
-The GUI keeps `KITCHEN_SCRIPT` for real-window checks while the Mac is locked:
+The current GUI keeps `KITCHEN_SCRIPT` for real-window checks:
 
-- `key=`, `type=` and `scroll=` steps go through the shell's native paths (`sendEvent:` with
-  synthesized `NSEvent`s, and `interpretKeyEvents:`), never through system input posting;
-- `snapshot=` captures the result.
+- `type=<key>:<text>` inserts text into a native field's editor;
+  `scroll=<key>:<y>` scrolls a native scroll view. These work in process
+  while the Mac is locked.
+- `key=tab`, `key=backtab` and `key=space` send synthesized `NSEvent`s through
+  the app's own window and need an unlocked session. Nothing posts system input.
+- `snapshot=<path>` captures the result. See `src/script.zig` for AppKit
+  steps and `src/main_gtk.zig` for the GTK subset.
 
 Shell-level unit tests for the UTF-16 ↔ UTF-8 range conversion run without a window.
 

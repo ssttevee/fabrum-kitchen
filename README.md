@@ -39,8 +39,12 @@ draw with) are fetched from GitHub by `zig build`.
 
 `kitchen-none` always uses a fabrum built for the `none` platform, whatever
 `-Dplatform` says, and links no OS UI library, so it cross-compiles:
-`zig build -Dtarget=x86_64-linux-musl`, `-Dtarget=x86_64-windows-gnu`, or
-`-Dtarget=arm-linux-gnueabi.2.38 -Dcpu=cortex_a7` for a PocketBook.
+`zig build -Dplatform=none -Dtarget=x86_64-linux-musl`,
+`zig build -Dplatform=none -Dtarget=x86_64-windows-gnu`, or
+`zig build -Dplatform=none -Dtarget=arm-linux-gnueabi.2.38 -Dcpu=cortex_a7`.
+That last target builds an ARM binary, not an InkView `.app`; for a
+PocketBook host see
+[fabrum-platform-inkview](https://github.com/ssttevee/fabrum-platform-inkview).
 
 ### `kitchen-none`
 
@@ -62,7 +66,7 @@ through the host contract (`fabrum.app.platform.none`) in two modes:
   `content`, `page`), which an InkView host maps to A2, partial and full
   updates.
 
-`zig build run-none` plays a 19-step script (hover, click, the checkbox,
+`zig build run-none` plays a script (hover, click, the checkbox,
 the switch, the slider, typing into the line editor and Enter, Tab and
 Space, the notes area, dragging the slider, scrolling the page, a click
 through to the background, the dialog) in both modes. Every step runs the
@@ -87,8 +91,8 @@ damage tracking and the renderer end to end. Snapshots of some steps go to
 composited frame, `NN-step-overlay.png` the overlay alone, and
 `NN-step-damage.png` the frame with the step's damage outlined; the e-ink
 frames are `eink-NN-step.png`. `--overlay` or `--eink` plays one mode,
-`--bench` times full and partial redraws, `--quiet` prints less. Arguments
-go after `--`: `zig build run-none -- --eink --out /tmp/eink`.
+`--bench` times full and partial redraws. `--quiet` is accepted but
+currently has no effect. Arguments go after `--`: `zig build run-none -- --eink --out /tmp/eink`.
 
 | | |
 |---|---|
@@ -103,7 +107,9 @@ The build passes the chosen renderer the Kitchen's own fabrum, since the
 renderer packages take the app's rather than fetching their own. **Known
 issue:** `zig build run-none -Drenderer=thorvg` fails the damage check with
 `error.DamageMissed`: with ThorVG the partial redraw differs from a full
-one. Pre-existing; the z2d renderer passes.
+one. Pre-existing; the z2d renderer passes. ThorVG also cannot draw
+`gray8`: use `--overlay` to select its supported mode (the damage issue
+still applies).
 
 ### Scripts for the windowed builds
 
@@ -114,7 +120,11 @@ locked: nothing is posted to the system's event stream). `src/script.zig`
 documents the steps: `click=<text>`, `type=<key>:<text>`, `press=<key>`,
 `slide=<key>:<value>`, `select=<key>:<index>`, `tab`, `menu=<menu>/<item>`,
 `answer=<index>`, `choose=<path>`, `resize=<w>x<h>`, `dump`,
-`snapshot=<path>`, `wait=<ms>`, `quit` and more. For example:
+`snapshot=<path>`, `wait=<ms>`, `quit` and more. GTK supports the subset
+listed in `src/main_gtk.zig`; `nsclick`, `mark`, `commit`, `key`,
+`privateclipboard`, `clipboard` and `close` are AppKit-only script steps.
+AppKit's `--drawn` and `--disable` command-line flags have no effect in
+the GTK program, which always shows the hybrid screen. For example:
 
 ```sh
 KITCHEN_SCRIPT='type=line:Hello;tab;dump;snapshot=/tmp/a.png;quit' zig build run
@@ -129,23 +139,23 @@ The interface and its update logic run without a window, through
 `fabrum.app.testing.Harness`, against fabrum's heuristic text measurement
 and its fake native widget tree (or its drawn widgets), on any OS.
 
-| Command | Test binaries | What runs |
-|---|---|---|
-| `zig build test` | 27 + 30 + 31 | the interface on the fake native tree (`src/kitchen.zig`), the AppKit program's (`src/main.zig`: the interface, the icons and the script), and `kitchen-none`'s |
-| `zig build test -Dplatform=none` | 27 + 31 | the interface with drawn widgets, and `kitchen-none`'s |
-| `zig build test -Dplatform=gtk` | 27 + 29 + 31 | the interface on GTK's fake tree, the GTK program's, and `kitchen-none`'s (`PATH=/opt/homebrew/bin:$PATH` on macOS with Homebrew) |
+| Command | What runs |
+|---|---|
+| `zig build test` | the interface on the fake native tree (`src/kitchen.zig`), the AppKit program's (`src/main.zig`: the interface, the icons and the script), and `kitchen-none`'s |
+| `zig build test -Dplatform=none` | the interface with drawn widgets, and `kitchen-none`'s |
+| `zig build test -Dplatform=gtk` | the interface on GTK's fake tree, the GTK program's, and `kitchen-none`'s (`PATH=/opt/homebrew/bin:$PATH` on macOS with Homebrew) |
 
-`kitchen-none`'s 31 (`src/none.zig`: the interface with drawn widgets, the
-script playing through in both modes with the damage always matching a
+`kitchen-none`'s tests (`src/none.zig`: the interface with drawn widgets,
+the script playing through in both modes with the damage always matching a
 full redraw, and `src/png.zig`'s encoder) are the same binary whatever
-`-Dplatform` says, so after one platform's run the others report them as
-cached and their summaries count 27 and 56. With `-Drenderer=thorvg` the
-script test fails (see above).
+`-Dplatform` says, so after one platform's run the others may report them
+as cached. With `-Drenderer=thorvg` the script test fails (see above).
 
 ## Files
 
 | File | What it is |
 |---|---|
+| `build.zig`, `build.zig.zon` | Build steps and options, and GitHub dependency pins |
 | `src/kitchen.zig` | The interface and its tests; `window_size` (Gio's 800×700) |
 | `src/kitchen/Hybrid.zig` | The hybrid screen (above) |
 | `src/kitchen/Kitchen.zig` | The all-drawn screen |
