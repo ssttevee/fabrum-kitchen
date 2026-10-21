@@ -4,10 +4,9 @@ A port of [Gio](https://gioui.org)'s Kitchen demo (`gio-example/kitchen`)
 to [fabrum](https://github.com/ssttevee/fabrum): one page with every kind
 of widget, used to drive fabrum's design. It has two jobs: push fabrum to
 grow what it lacked (scrolling, keyboard input and focus, text editing,
-dragging, timed frames, dialogs, a file chooser, the clipboard), and keep
-fabrum from fitting only [OpenEtcher](https://github.com/ssttevee/open-etcher),
-the disk flasher it grew up with. It runs on all three of fabrum's platforms
-from one interface.
+dragging, timed frames, dialogs, a file chooser, the clipboard), and check
+that the choices fabrum started with hold for a very different kind of app.
+It runs on all three of fabrum's platforms from one interface.
 
 ![The Kitchen on the none platform, as an RGBA overlay over a background](docs/images/overlay-initial.png)
 

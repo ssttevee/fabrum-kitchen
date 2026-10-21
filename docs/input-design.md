@@ -31,7 +31,7 @@ The Kitchen is a port of Gio's Kitchen demo (`gio-example/kitchen/kitchen.go`). 
 
 - drive the design of what fabrum lacks: scrolling, keyboard input and focus, text editing,
   dragging and animation;
-- keep fabrum from fitting only OpenEtcher, the disk flasher it grew up with.
+- check that the choices fabrum started with hold for a very different kind of app.
 
 Contents:
 
@@ -47,7 +47,7 @@ Contents:
 10. [Disabled state](#10-disabled-state)
 11. [fabrum.app.platform](#11-fabrumappplatform)
 12. [Testing without a window](#12-testing-without-a-window)
-13. [Over-fitting: what OpenEtcher taught fabrum, revisited](#13-over-fitting-what-openetcher-taught-fabrum-revisited)
+13. [Over-fitting: fabrum's first choices, revisited](#13-over-fitting-fabrums-first-choices-revisited)
 14. [Risks and open questions](#14-risks-and-open-questions)
 15. [Phase B plan](#15-phase-b-plan)
 
@@ -275,8 +275,8 @@ pub const ScrollEvent = struct {
 - The runtime handles the thumb's drag itself (§5):
   - dragging maps pointer delta to offset by `content / viewport`;
   - pressing the track pages towards the pointer.
-- Its look comes from a provided `app.ScrollbarStyle`, the context pattern OpenEtcher uses for
-  its theme. The default is a macOS-style overlay: thin, and wider on hover.
+- Its look comes from a provided `app.ScrollbarStyle`, the context pattern apps use for
+  their themes. The default is a macOS-style overlay: thin, and wider on hover.
 
 ### Virtualised lists
 
@@ -1197,14 +1197,14 @@ None of these posts system input.
 
 **Out of the neutral contract, deliberately**
 
-- File dialogs and alerts. OpenEtcher's `chooseFile` and quit confirmation become per-OS
+- File dialogs and alerts. A file chooser and a quit confirmation become per-OS
   extras, `platform.macos.chooseFile` and `platform.macos.confirm`, until a portal-based Linux
   version justifies a neutral `platform.dialogs`.
 - Menus. Same as dialogs.
 
 ### Starting an app
 
-There are two levels. The **low-level** one is what OpenEtcher and the Kitchen do today: the app
+There are two levels. The **low-level** one is what the Kitchen does today: the app
 owns its `Runtime` and renderer, and hands the shell a `Host` of callbacks. The **high-level**
 one is generic over the renderer type, which the app passes in, so fabrum doesn't import it:
 
@@ -1262,14 +1262,14 @@ cleanly. A missing namespace would give a vaguer error.
 
 **How dependents declare it**
 
-- **Kitchen and OpenEtcher's GUI:** they take the default, and pass nothing:
+- **The Kitchen and other apps:** they take the default, and pass nothing:
 
   ```zig
   const fabrum_dep = b.dependency("fabrum", .{ .target = target, .optimize = optimize });
   ```
 
-  OpenEtcher already requests fabrum only when building its macOS GUI, so its cross-platform CLI
-  never instantiates it.
+  An app that also has a command-line build can request fabrum only when building its GUI, so
+  the CLI never instantiates it.
 - **A layout-only user:**
 
   ```zig
@@ -1373,13 +1373,8 @@ Follow SDL, GLFW 3.4 and winit:
    - import `fabrum.app.platform.macos`;
    - move `script.zig`'s generic parts (the step parser, `findText`, `snapshot`) into the
      platform's `Automation` as they settle.
-4. In OpenEtcher's GUI:
-   - delete `src/app/platform/macos/`;
-   - use `fabrum.app.platform.macos`;
-   - keep its file picker and quit confirmation as app code, or as `platform.macos.chooseFile` /
-     `confirm` extras. The shell then needs two generic hooks it lacks today: `should_close`, so
-     the app can veto a close or quit, and a way to show a sheet or alert.
-   - Its renderer and Quartz dependency are unchanged.
+4. For apps that ask before closing, the shell needs two generic hooks it lacks today:
+   `should_close`, so the app can veto a close or quit, and a way to show a sheet or alert.
 
 ## 12. Testing without a window
 
@@ -1462,9 +1457,9 @@ The GUI keeps `KITCHEN_SCRIPT` for real-window checks while the Mac is locked:
 
 Shell-level unit tests for the UTF-16 ↔ UTF-8 range conversion run without a window.
 
-## 13. Over-fitting: what OpenEtcher taught fabrum, revisited
+## 13. Over-fitting: fabrum's first choices, revisited
 
-| OpenEtcher-driven choice | Holds for the Kitchen? |
+| Choice fabrum started with | Holds for the Kitchen? |
 |---|---|
 | **Hit-testing**: topmost unit in paint order; every clipping ancestor checked | **Holds**, and is better than Clay, which only checks the nearest clip. Needs: inverse transforms (§9); scroll thumbs and floating overlays already work as later siblings. `FloatingConfig.pointer_passthrough` (declared, unimplemented) becomes needed for decorative overlays such as the editor's hint text over its field |
 | **Hover** = the hit element plus its keyed ancestors | **Holds.** Read-only selection and focus rings reuse the same chain |
@@ -1477,7 +1472,7 @@ Shell-level unit tests for the UTF-16 ↔ UTF-8 range conversion run without a w
 | **Messages only from clicks and `Poster`** | **Generalises** to `on_pointer`, `focus.on_key`, `focus.on_text`, `on_scroll`, timers, the clipboard, and runtime-generated payloads. Today's ownership rule, that a payload passed to the runtime belongs to the message, already covers them |
 | **`Runtime.mouse` + `needsFrame`**, pull-based frames | **Holds**, extended with `nextFrame()` for timed frames. "Dirty after any delivered message" stays |
 | **Cursor**: `default` or `pointer` from clickability | **Too narrow.** Needs `text`, `grab`, `grabbing` and per-element override |
-| **Dark window and transparent title bar in the shell** | Belonged to OpenEtcher. Now `Options.dark`; the title bar style is a per-app option |
+| **Dark window and transparent title bar in the shell** | An app's look, not the shell's. Now `Options.dark`; the title bar style is a per-app option |
 | **Text style**: weight, size, overflow, no slant | Needs `slant` (§9) |
 | **`percent` sizing** | Bug, as shown in §1 |
 
@@ -1565,7 +1560,7 @@ it is testable without a window.
 | Step | fabrum (layout / app / platform), renderers | Kitchen unlocked | Tests |
 |---|---|---|---|
 | 0 | Fix `percent` under `grow` (layout) | Progress bar shows 0.3 correctly | layout unit test; Kitchen fill width = 0.3 × track |
-| 1 | Move the shell into `fabrum.app.platform` (git mv, `platform` option, `@compileError` stub); port the Kitchen and OpenEtcher | — | fabrum `zig build test` with `-Dplatform=false`; both apps build; scripted snapshots unchanged |
+| 1 | Move the shell into `fabrum.app.platform` (git mv, `platform` option, `@compileError` stub); port the Kitchen | — | fabrum `zig build test` with `-Dplatform=false`; the Kitchen builds; scripted snapshots unchanged |
 | 2 | **Time and frames:** `now` in `frame`, `ui.now`/`ctx.now`, `ui.animate`, `ui.every`/`ui.after`, `Runtime.nextFrame`; `Platform.setAnimating`/`wakeAt`; macOS `CADisplayLink` + timer; harness `advance`/`animating` | Progress ticks every second; spinner and Transform can animate once drawn | Harness: timers fire on `advance`; `animating()` only while requested; tick wraps at 1 |
 | 3 | **Drawing:** `layout.Path` (arcs) + Quartz; `Fill.linear` + Quartz; `text.Style.slant` + Quartz; `transform` push/pop + Quartz; hit-testing through transforms | Progress circle, spinner, gradient strip, italic text, Transform rotating the page | layout: command order and fills; app: clicking through a rotated container; snapshots |
 | 4 | **Dragging:** `on_pointer`, capture, slop, cancel, click counts; `Runtime.windowFocus`; cursors | Slider and its value | Harness `drag`: 0.75, clamping, cancel on focus loss |
