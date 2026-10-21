@@ -24,7 +24,8 @@
 //! It writes PNGs of some steps to `/tmp/kitchen-snapshots/p2/` (or
 //! `--out DIR`): the composited frame, the overlay alone, and the frame
 //! with the damage outlined; the e-ink frames as `eink-*`. `--bench` times
-//! full and partial redraws.
+//! full and partial redraws. `--quiet` hides the per-step table while keeping
+//! the per-mode result and requested benchmark output.
 //!
 //! It links no OS UI library, so it cross-compiles:
 //! `zig build -Dtarget=x86_64-linux-musl`, `-Dtarget=x86_64-windows-gnu`,
@@ -190,29 +191,38 @@ pub fn main(init: std.process.Init) !void {
         try host.init(gpa, io, mode);
         defer host.deinit();
 
-        try out.print("kitchen-none ({t}): {s} renderer, {d}x{d} {t}, writing to {s}\n", .{ mode, renderer_name, width, height, mode.pixelFormat(), options.out });
-        try out.print("{s:<16} {s:>5} {s:>7} {s:>9} {s:>8} {s:>9} {s:>9}  {s:<11} {s}\n", .{ "step", "taken", "regions", "pixels", "frame", "render", "composite", "refresh", "next frame" });
+        if (!options.quiet) {
+            try out.print("kitchen-none ({t}): {s} renderer, {d}x{d} {t}, writing to {s}\n", .{ mode, renderer_name, width, height, mode.pixelFormat(), options.out });
+            try out.print("{s:<16} {s:>5} {s:>7} {s:>9} {s:>8} {s:>9} {s:>9}  {s:<11} {s}\n", .{ "step", "taken", "regions", "pixels", "frame", "render", "composite", "refresh", "next frame" });
+        }
         for (script, 0..) |step, n| {
             const report = try host.play(step);
-            try out.print("{s:<16} {s:>5} {d:>7} {d:>9} {d:>6}us {d:>7}us {d:>7}us  {s:<11} {s}\n", .{
-                step.name,
-                if (report.taken) |t| (if (t) "yes" else "no") else "-",
-                report.regions,
-                report.pixels,
-                report.frame_us,
-                report.render_us,
-                report.composite_us,
-                if (report.regions > 0) @tagName(report.refresh) else "-",
-                if (report.next_frame) |due| (if (due.nanoseconds <= host.now.nanoseconds) "now" else "scheduled") else "when input comes",
-            });
+            try writeStep(out, options.quiet, step, report, host.now);
             try host.check();
             if (step.snapshot) try host.snapshot(options.out, n + 1, step.name);
         }
+        if (options.quiet) try out.print("kitchen-none ({t}, {s}): ", .{ mode, renderer_name });
         try out.print("every step: the redrawn damage matched a full redraw\n\n", .{});
 
         if (options.bench) try host.bench(out);
     }
     try out.flush();
+}
+
+/// The verbose per-step report; quiet still runs the script and damage check.
+fn writeStep(out: *Io.Writer, quiet: bool, step: Step, report: Host.Report, now: Io.Timestamp) !void {
+    if (quiet) return;
+    try out.print("{s:<16} {s:>5} {d:>7} {d:>9} {d:>6}us {d:>7}us {d:>7}us  {s:<11} {s}\n", .{
+        step.name,
+        if (report.taken) |t| (if (t) "yes" else "no") else "-",
+        report.regions,
+        report.pixels,
+        report.frame_us,
+        report.render_us,
+        report.composite_us,
+        if (report.regions > 0) @tagName(report.refresh) else "-",
+        if (report.next_frame) |due| (if (due.nanoseconds <= now.nanoseconds) "now" else "scheduled") else "when input comes",
+    });
 }
 
 /// Services an e-reader's toolkit would give: a system keyboard that
@@ -680,4 +690,16 @@ test "the script plays through in supported modes, and redrawing the damage alwa
         try std.testing.expectEqual(0, host.runtime.scrollInfo(app.testing.rootInstance(Hybrid).element("page")).?.offset.y);
         if (mode == .eink) try std.testing.expectEqual(2, host.services.text_entries);
     }
+}
+
+test "quiet suppresses the per-step report" {
+    var buffer: [1024]u8 = undefined;
+    var out = Io.Writer.fixed(&buffer);
+    const step: Step = .{ .name = "initial", .action = .start };
+    const report: Host.Report = .{};
+    try writeStep(&out, true, step, report, .{ .nanoseconds = 0 });
+    try std.testing.expectEqual(0, out.buffered().len);
+    try writeStep(&out, false, step, report, .{ .nanoseconds = 0 });
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "initial") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "when input comes") != null);
 }

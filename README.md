@@ -91,8 +91,9 @@ damage tracking and the renderer end to end. Snapshots of some steps go to
 composited frame, `NN-step-overlay.png` the overlay alone, and
 `NN-step-damage.png` the frame with the step's damage outlined; the e-ink
 frames are `eink-NN-step.png`. `--overlay` or `--eink` plays one mode,
-`--bench` times full and partial redraws. `--quiet` is accepted but
-currently has no effect. Arguments go after `--`: `zig build run-none -- --eink --out /tmp/eink`.
+`--bench` times full and partial redraws. `--quiet` hides the per-step table,
+keeping each mode's damage-check result and any requested benchmark output.
+It still runs every step, checks the pixels, writes snapshots, and reports errors. Arguments go after `--`: `zig build run-none -- --eink --out /tmp/eink`.
 
 | | |
 |---|---|
