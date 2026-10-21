@@ -5,18 +5,18 @@
     .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .fabrum = .{
-            .url = "git+https://github.com/ssttevee/fabrum#2047c22cca6848c4cf7037e0df786905479fa339",
-            .hash = "fabrum-0.0.0-qj9rbWoAEwC6FowskZHvonwqTEUNzMcBqBBTGkK5nDPU",
+            .url = "git+https://github.com/ssttevee/fabrum#bdaa521f6c229915be6ba9a629e89bd91d67093a",
+            .hash = "fabrum-0.0.0-qj9rbUxiwR_vqc81WFRFxVhPnpGW15PTanoAHN1cz_yp",
         },
         // kitchen-none draws with one of these (-Drenderer).
         .fabrum_renderer_z2d = .{
-            .url = "git+https://github.com/ssttevee/fabrum-renderer-z2d#b0f724b10e1c2aff7515fa2fd5c9d0fd7525c293",
-            .hash = "fabrum_renderer_z2d-0.0.0-HsrDaiZcAAA8h5btEFH0jKwQP4sYJ8giyVCMrcfOkXYi",
+            .url = "git+https://github.com/ssttevee/fabrum-renderer-z2d#ec8a8dc0f2f8258b4f1b38a45a2aa24227b107a1",
+            .hash = "fabrum_renderer_z2d-0.0.0-HsrDapbTAgDV6GDJsXnB8M6mP6wCyDZZjg0Pmfy9g71p",
             .lazy = true,
         },
         .fabrum_renderer_thorvg = .{
-            .url = "git+https://github.com/ssttevee/fabrum-renderer-thorvg#a4f1d7e48415ea684b4b6140092ed970a63b0ea8",
-            .hash = "fabrum_renderer_thorvg-0.0.0-i-WXrVleAACgbDZKcQBp58oze7XfMKjW4_Q-tHEDZmKF",
+            .url = "git+https://github.com/ssttevee/fabrum-renderer-thorvg#05c0ec43cd2a70ce16ff34c8f15f7ce12499f98f",
+            .hash = "fabrum_renderer_thorvg-0.0.0-i-WXrX_xAgDNYebISIVu384luVAScNzxjkkv-KYo4VQn",
             .lazy = true,
         },
     },
