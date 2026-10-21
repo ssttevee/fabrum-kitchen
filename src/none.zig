@@ -641,8 +641,10 @@ test {
     _ = png;
 }
 
-test "the script plays through in both modes, and redrawing the damage always matches a full redraw" {
-    for ([_]Mode{ .overlay, .eink }) |mode| {
+test "the script plays through in supported modes, and redrawing the damage always matches a full redraw" {
+    // ThorVG supports RGBA overlays but not gray8 panels.
+    const modes: []const Mode = if (std.mem.eql(u8, renderer_name, "thorvg")) &.{.overlay} else &.{ .overlay, .eink };
+    for (modes) |mode| {
         var host: Host = undefined;
         try host.init(std.testing.allocator, std.testing.io, mode);
         defer host.deinit();

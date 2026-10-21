@@ -104,12 +104,18 @@ currently has no effect. Arguments go after `--`: `zig build run-none -- --eink 
 default; pure Zig, draws `gray8`) or
 [fabrum-renderer-thorvg](https://github.com/ssttevee/fabrum-renderer-thorvg).
 The build passes the chosen renderer the Kitchen's own fabrum, since the
-renderer packages take the app's rather than fetching their own. **Known
-issue:** `zig build run-none -Drenderer=thorvg` fails the damage check with
-`error.DamageMissed`: with ThorVG the partial redraw differs from a full
-one. Pre-existing; the z2d renderer passes. ThorVG also cannot draw
-`gray8`: use `--overlay` to select its supported mode (the damage issue
-still applies).
+renderer packages take the app's rather than fetching their own. ThorVG's
+renderer now keeps full-surface raster coordinates for damage redraws, so
+the overlay script matches a full redraw. This Kitchen's pinned ThorVG
+revision predates that fix; to verify a local fixed checkout without changing
+the pin, run:
+
+```sh
+zig build run-none -Dplatform=none -Drenderer=thorvg --fork=/path/to/zig-fabrum-renderer-thorvg -- --overlay
+```
+
+ThorVG cannot draw `gray8`; select `--overlay`. The z2d renderer supports
+both modes.
 
 ### Scripts for the windowed builds
 
@@ -146,10 +152,12 @@ and its fake native widget tree (or its drawn widgets), on any OS.
 | `zig build test -Dplatform=gtk` | the interface on GTK's fake tree, the GTK program's, and `kitchen-none`'s (`PATH=/opt/homebrew/bin:$PATH` on macOS with Homebrew) |
 
 `kitchen-none`'s tests (`src/none.zig`: the interface with drawn widgets,
-the script playing through in both modes with the damage always matching a
-full redraw, and `src/png.zig`'s encoder) are the same binary whatever
+the script playing through in both z2d modes (overlay only with ThorVG),
+with the damage always matching a full redraw, and `src/png.zig`'s encoder) are the same binary whatever
 `-Dplatform` says, so after one platform's run the others may report them
-as cached. With `-Drenderer=thorvg` the script test fails (see above).
+as cached. To test the corrected ThorVG renderer, add
+`-Drenderer=thorvg --fork=/path/to/zig-fabrum-renderer-thorvg`; its script
+covers the supported overlay format.
 
 ## Files
 
