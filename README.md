@@ -33,8 +33,8 @@ draw with) are fetched from GitHub by `zig build`.
 
 | Platform | Build | Run | Binary | What hosts the Kitchen |
 |---|---|---|---|---|
-| AppKit, macOS (the default) | `zig build` | `zig build run` | `kitchen` | fabrum's AppKit platform: native controls, canvas layers drawn with Quartz. `--drawn` shows `Kitchen.zig` instead; `--disable` disables every widget of the drawn screen, as Gio's `-disable` does. |
-| GTK 4 | `zig build -Dplatform=gtk` | `zig build run-gtk -Dplatform=gtk` | `kitchen-gtk` | fabrum's GTK platform: GTK's controls, canvas layers drawn with Cairo. GTK 4 comes from `pkg-config`; with Homebrew on macOS, `PATH=/opt/homebrew/bin:$PATH`. |
+| AppKit, macOS (the default) | `zig build` | `zig build run` | `kitchen` | fabrum's AppKit platform: native controls, canvas layers drawn with Quartz. `--drawn` shows `Kitchen.zig` instead; `--disable` selects the drawn screen and disables every widget, as Gio's `-disable` does. |
+| GTK 4 | `zig build -Dplatform=gtk` | `zig build run-gtk -Dplatform=gtk` | `kitchen-gtk` | fabrum's GTK platform: GTK's controls, canvas layers drawn with Cairo. `--drawn` selects the entirely drawn screen and `--disable` selects it with every widget disabled. GTK 4 comes from `pkg-config`; with Homebrew on macOS, `PATH=/opt/homebrew/bin:$PATH`. |
 | none | `zig build` (always built) | `zig build run-none [-Drenderer=z2d\|thorvg]` | `kitchen-none` | The Kitchen's own host, `src/none.zig`: no window and no toolkit, pixels drawn by a portable renderer. |
 
 `kitchen-none` always uses a fabrum built for the `none` platform, whatever
@@ -129,8 +129,11 @@ documents the steps: `click=<text>`, `type=<key>:<text>`, `press=<key>`,
 `snapshot=<path>`, `wait=<ms>`, `quit` and more. GTK supports the subset
 listed in `src/main_gtk.zig`; `nsclick`, `mark`, `commit`, `key`,
 `privateclipboard`, `clipboard` and `close` are AppKit-only script steps.
-AppKit's `--drawn` and `--disable` command-line flags have no effect in
-the GTK program, which always shows the hybrid screen. For example:
+Both windowed programs accept `--drawn` for the entirely drawn screen and
+`--disable` to select that screen with all widgets disabled. GTK draws the
+plus/check icons as Pango glyphs because its Cairo renderer does not yet draw
+SVG pictures. Script pointer and keyboard steps work with either screen;
+steps naming native handles need the hybrid screen. For example:
 
 ```sh
 KITCHEN_SCRIPT='type=line:Hello;tab;dump;snapshot=/tmp/a.png;quit' zig build run

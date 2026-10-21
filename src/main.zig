@@ -6,7 +6,7 @@
 //!
 //! - `--drawn` shows the same screen drawn entirely by fabrum
 //!   (`kitchen.Kitchen`), for comparison;
-//! - `--disable` disables every widget of the drawn screen, as Gio's
+//! - `--disable` selects and disables every widget of the drawn screen, as Gio's
 //!   Kitchen's `-disable` does.
 //!
 //! Debug builds read `KITCHEN_SCRIPT`, steps to run once the window is up,
@@ -22,6 +22,7 @@ const fabrum = @import("fabrum");
 const appkit = fabrum.app.platform.appkit;
 
 const kitchen = @import("kitchen.zig");
+const GuiOptions = @import("gui_options.zig");
 const Icons = @import("icons.zig");
 const Script = @import("script.zig").Script;
 const LayoutFile = @import("script.zig").LayoutFile;
@@ -33,19 +34,11 @@ pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
 
-    var drawn = false;
-    var props: kitchen.Kitchen.Props = .{};
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    for (args[1..]) |arg| {
-        if (std.mem.eql(u8, arg, "--disable")) {
-            props.disabled = true;
-        } else if (std.mem.eql(u8, arg, "--drawn")) {
-            drawn = true;
-        } else {
-            std.log.err("unknown argument: {s}", .{arg});
-            return error.InvalidArgument;
-        }
-    }
+    const options = GuiOptions.parse(args[1..]) catch |err| {
+        std.log.err("expected --drawn or --disable", .{});
+        return err;
+    };
 
     // they live as long as the process, as `run` never returns
     var icons: Icons = try .init(gpa);
@@ -57,9 +50,9 @@ pub fn main(init: std.process.Init) !void {
     };
     const provide: []const fabrum.app.RootValue = &.{.of(&icons_interface)};
 
-    if (drawn) {
+    if (options.drawn) {
         const gui = try gpa.create(DrawnApp);
-        try gui.init(gpa, io, props, window, .{ .provide = provide });
+        try gui.init(gpa, io, .{ .disabled = options.disabled }, window, .{ .provide = provide });
         try runScript(DrawnApp, gui, init);
         gui.run();
     } else {
@@ -94,6 +87,7 @@ fn writeLayout(gui: *HybridApp, init: std.process.Init) !void {
 }
 
 test {
+    _ = GuiOptions;
     _ = kitchen;
     _ = Icons;
     _ = @import("script.zig");
