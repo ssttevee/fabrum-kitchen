@@ -48,11 +48,14 @@ const kitchen = @import("kitchen.zig");
 const Hybrid = kitchen.Hybrid;
 const png = @import("png.zig");
 
+const measuring = @import("kitchen_options").measure;
+const Trace = @import("phase_trace.zig");
+const FramePolicy = enum { present_once, batched };
+
 const Runtime = app.Runtime(.{ .Text = Renderer.Text });
 
 const width: u32 = @intFromFloat(kitchen.window_size.x);
 const height: u32 = @intFromFloat(kitchen.window_size.y);
-const viewport = kitchen.window_size;
 
 /// The look of the drawn widgets: macOS's light colors, translucent where
 /// the page would be, though the overlay leaves the page out.
@@ -152,6 +155,7 @@ const Options = struct {
     out: []const u8 = "/tmp/kitchen-snapshots/p2",
     bench: bool = false,
     quiet: bool = false,
+    frame_policy: FramePolicy = .present_once,
     modes: []const Mode = &.{ .overlay, .eink },
 };
 
@@ -169,6 +173,9 @@ pub fn main(init: std.process.Init) !void {
             options.out = args[i];
         } else if (std.mem.eql(u8, arg, "--bench")) {
             options.bench = true;
+        } else if (measuring and std.mem.eql(u8, arg, "--frame-policy") and i + 1 < args.len) {
+            i += 1;
+            options.frame_policy = std.meta.stringToEnum(FramePolicy, args[i]) orelse return error.InvalidArgument;
         } else if (std.mem.eql(u8, arg, "--quiet")) {
             options.quiet = true;
         } else if (std.mem.eql(u8, arg, "--eink")) {
@@ -190,6 +197,7 @@ pub fn main(init: std.process.Init) !void {
         var host: Host = undefined;
         try host.init(gpa, io, mode);
         defer host.deinit();
+        host.frame_policy = options.frame_policy;
 
         if (!options.quiet) {
             try out.print("kitchen-none ({t}): {s} renderer, {d}x{d} {t}, writing to {s}\n", .{ mode, renderer_name, width, height, mode.pixelFormat(), options.out });
@@ -204,6 +212,10 @@ pub fn main(init: std.process.Init) !void {
         if (options.quiet) try out.print("kitchen-none ({t}, {s}): ", .{ mode, renderer_name });
         try out.print("every step: the redrawn damage matched a full redraw\n\n", .{});
 
+        if (measuring) {
+            try host.traceWorkloads();
+            try host.trace.write(out);
+        }
         if (options.bench) try host.bench(out);
     }
     try out.flush();
@@ -260,6 +272,11 @@ const Host = struct {
     renderer: Renderer,
     runtime: Runtime,
     services: EinkServices = .{},
+    trace: if (measuring) Trace else void = if (measuring) .{} else {},
+    frame_policy: FramePolicy = .present_once,
+    width: u32 = width,
+    height: u32 = height,
+
     /// The time frames run at: a fake clock, a frame apart per step, so
     /// snapshots are the same every run.
     now: Io.Timestamp = .zero,
@@ -275,6 +292,10 @@ const Host = struct {
     full_composited: []u8,
     /// The last step's regions, for outlining.
     damage: std.ArrayList(Rect) = .empty,
+
+    fn viewport(self: *const Host) Vec2 {
+        return .init(@floatFromInt(self.width), @floatFromInt(self.height));
+    }
 
     fn init(self: *Host, gpa: Allocator, io: Io, mode: Mode) !void {
         const bytes = mode.pixelFormat().bytesPerPixel();
@@ -304,17 +325,20 @@ const Host = struct {
             .full_composited = full_composited,
         };
         // the services point into the host, so the runtime is made in place
-        self.runtime = try .init(gpa, .{
+        var runtime_options: Runtime.Options = .{
             .io = io,
             .text_context = self.renderer.text_context,
             .theme = theme,
             .capabilities = mode.capabilities(),
             .services = if (mode == .eink) self.services.services() else null,
-        });
-        paintBackground(self.background);
+        };
+        if (measuring) runtime_options.measure_phases = true;
+        self.runtime = try .init(gpa, runtime_options);
+        paintBackground(self.background, self.width, self.height);
     }
 
     fn deinit(self: *Host) void {
+        if (measuring) self.trace.deinit(self.gpa);
         self.runtime.deinit();
         self.renderer.deinit();
         self.damage.deinit(self.gpa);
@@ -326,7 +350,7 @@ const Host = struct {
     }
 
     fn pixels(self: *const Host, buffer: []align(4) u8) layout.Surface.Pixels {
-        return .packed_(buffer, width, height, self.mode.pixelFormat());
+        return .packed_(buffer, self.width, self.height, self.mode.pixelFormat());
     }
 
     const Report = struct {
@@ -349,19 +373,20 @@ const Host = struct {
     /// Plays one step as a host does: input in, a frame, the damage, then
     /// drawing and compositing just that.
     fn play(self: *Host, step: Step) !Report {
+        if (measuring) self.trace.step = step.name;
         var report: Report = .{};
         switch (step.action) {
             .start => {},
-            .hover => |target| report.taken = try self.runtime.mouse(.{ .position = try self.locate(target) }),
+            .hover => |target| report.taken = try self.traceMouse(.{ .position = try self.locate(target) }),
             .click => |target| {
                 const point = try self.locate(target);
-                const pressed = try self.runtime.mouse(.{ .position = point, .pressed = primary() });
-                const released = try self.runtime.mouse(.{ .position = point });
+                const pressed = try self.traceMouse(.{ .position = point, .pressed = primary() });
+                const released = try self.traceMouse(.{ .position = point });
                 report.taken = pressed or released;
             },
             .key => |key| {
-                report.taken = try self.runtime.key(.{ .key = key });
-                _ = try self.runtime.key(.{ .key = key, .phase = .release });
+                report.taken = try self.traceKey(.{ .key = key });
+                _ = try self.traceKey(.{ .key = key, .phase = .release });
             },
             .type => |text| {
                 var taken = true;
@@ -373,8 +398,8 @@ const Host = struct {
                             const cp = try std.unicode.utf8Decode(slice);
                             const key: app.KeyEvent.Key = if (cp == ' ') .space else if (cp < 128) .{ .char = std.ascii.toLower(@intCast(cp)) } else .unknown;
                             const event: app.KeyEvent = .{ .key = key, .text = slice, .modifiers = .{ .shift = cp < 128 and std.ascii.isUpper(@intCast(cp)) } };
-                            if (!try self.runtime.key(event)) taken = false;
-                            _ = try self.runtime.key(.{ .key = key, .phase = .release, .modifiers = event.modifiers });
+                            if (!try self.traceKey(event)) taken = false;
+                            _ = try self.traceKey(.{ .key = key, .phase = .release, .modifiers = event.modifiers });
                             try self.frames(&report);
                         }
                     },
@@ -386,19 +411,19 @@ const Host = struct {
             .drag => |drag| {
                 const from = try self.locate(drag.from);
                 const to = try self.locate(drag.to);
-                var taken = try self.runtime.mouse(.{ .position = from, .pressed = primary() });
+                var taken = try self.traceMouse(.{ .position = from, .pressed = primary() });
                 try self.frames(&report);
                 const n: f32 = @floatFromInt(drag.steps);
                 for (1..drag.steps + 1) |i| {
                     const t: f32 = @as(f32, @floatFromInt(i)) / n;
                     const at: Vec2 = .init(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t);
-                    if (!try self.runtime.mouse(.{ .position = at, .pressed = primary() })) taken = false;
+                    if (!try self.traceMouse(.{ .position = at, .pressed = primary() })) taken = false;
                     try self.frames(&report);
                 }
-                _ = try self.runtime.mouse(.{ .position = to });
+                _ = try self.traceMouse(.{ .position = to });
                 report.taken = taken;
             },
-            .scroll => |scroll| report.taken = try self.runtime.mouse(.{ .position = try self.locate(scroll.at), .scroll_delta = scroll.delta }),
+            .scroll => |scroll| report.taken = try self.traceMouse(.{ .position = try self.locate(scroll.at), .scroll_delta = scroll.delta }),
         }
         try self.frames(&report);
         report.next_frame = self.runtime.nextFrame();
@@ -406,35 +431,75 @@ const Host = struct {
     }
 
     /// Runs the frames due now, then draws what changed over them.
+    /// One presented update may contain multiple runtime frames; retain that count.
     fn frames(self: *Host, report: *Report) !void {
-        // frames while one is due now (a modal dialog taking focus asks for
-        // a second); the host's clock moves on a frame each
+        const before = if (measuring) self.runtime.core.timings else {};
+        const started = if (measuring) Io.Clock.awake.now(self.io) else .zero;
         var count: usize = 0;
         while (self.runtime.nextFrame()) |due| {
             if (due.nanoseconds > self.now.nanoseconds or count == 4) break;
             var timer = Timer.start(self.io);
-            _ = try self.runtime.frame(Hybrid, self.mode.props(), viewport, self.now);
+            _ = try self.runtime.frame(Hybrid, self.mode.props(), self.viewport(), self.now);
             report.frame_us += timer.lap();
             count += 1;
-            self.now = self.now.addDuration(.fromMilliseconds(16));
-        }
-        if (count > 0) {
-            var timer = Timer.start(self.io);
-            // what changed over those frames, since the last draw
-            const regions = try self.runtime.damage();
-            const refresh = self.runtime.refresh();
-            if (report.regions == 0) self.damage.clearRetainingCapacity();
-            try self.damage.appendSlice(self.gpa, regions);
-            report.regions += regions.len;
-            for (regions) |r| report.pixels += @intFromFloat(r.w * r.h);
-            if (regions.len > 0) report.refresh = report.refresh.strongest(refresh);
-
-            if (regions.len > 0) {
-                try layout.draw(&self.renderer, self.runtime.commands(), .pixels, self.pixels(self.overlay), regions);
-                report.render_us += timer.lap();
-                for (regions) |r| self.composite(self.composited, self.overlay, r);
-                report.composite_us += timer.lap();
+            if (self.frame_policy == .present_once) {
+                // Animation requests a future presentation, not another rebuild
+                // before the current picture is drawn. Immediate state changes
+                // (for example modal refocus) may still need another pass.
+                if (!self.runtime.needsFrame()) break;
+            } else {
+                self.now = self.now.addDuration(.fromMilliseconds(16));
             }
+        }
+        if (count == 0) return;
+        if (self.frame_policy == .present_once) self.now = self.now.addDuration(.fromMilliseconds(16));
+        const regions = try self.runtime.damage();
+        const refresh = self.runtime.refresh();
+        if (report.regions == 0) self.damage.clearRetainingCapacity();
+        try self.damage.appendSlice(self.gpa, regions);
+        report.regions += regions.len;
+        var area: usize = 0;
+        for (regions) |r| area += @intFromFloat(r.w * r.h);
+        report.pixels += area;
+        if (regions.len > 0) report.refresh = report.refresh.strongest(refresh);
+
+        var composite_ns: u64 = 0;
+        if (regions.len > 0) {
+            var timer = Timer.start(self.io);
+            const render_started = if (measuring) self.runtime.core.timings.start(self.io) else .zero;
+            try layout.draw(&self.renderer, self.runtime.commands(), .pixels, self.pixels(self.overlay), regions);
+            if (measuring) self.runtime.core.timings.end(self.io, .render, render_started);
+            report.render_us += timer.lap();
+            const composite_started = if (measuring) Io.Clock.awake.now(self.io) else .zero;
+            for (regions) |r| self.composite(self.composited, self.overlay, r);
+            if (measuring) composite_ns = Trace.elapsed(self.io, composite_started);
+            report.composite_us += timer.lap();
+        }
+        if (measuring) {
+            const total_ns = Trace.elapsed(self.io, started) + self.trace.input_ns + self.trace.resize_ns;
+            const after = self.runtime.core.timings;
+            try self.trace.rows.append(self.gpa, .{
+                .step = self.trace.step,
+                .frames = count,
+                .commands = self.runtime.commands().len,
+                .regions = regions.len,
+                .damage_pixels = area,
+                .width = self.width,
+                .height = self.height,
+                .total_ns = total_ns,
+                .frame_ns = Trace.delta(before, after, .frame),
+                .views_ns = Trace.delta(before, after, .views),
+                .layout_ns = Trace.delta(before, after, .layout),
+                .commands_ns = Trace.delta(before, after, .commands),
+                .reconcile_ns = Trace.delta(before, after, .reconcile),
+                .damage_ns = Trace.delta(before, after, .damage),
+                .render_ns = Trace.delta(before, after, .render),
+                .composite_ns = composite_ns,
+                .resize_ns = self.trace.resize_ns,
+                .input_ns = self.trace.input_ns,
+            });
+            self.trace.resize_ns = 0;
+            self.trace.input_ns = 0;
         }
     }
 
@@ -442,7 +507,7 @@ const Host = struct {
     /// redrawing only the damage gave.
     fn check(self: *Host) !void {
         try layout.draw(&self.renderer, self.runtime.commands(), .pixels, self.pixels(self.full_overlay), null);
-        self.composite(self.full_composited, self.full_overlay, .init(0, 0, viewport.x, viewport.y));
+        self.composite(self.full_composited, self.full_overlay, .init(0, 0, self.viewport().x, self.viewport().y));
         if (!std.mem.eql(u8, self.overlay, self.full_overlay) or !std.mem.eql(u8, self.composited, self.full_composited)) {
             std.log.err("redrawing the damage gave different pixels from redrawing everything", .{});
             return error.DamageMissed;
@@ -467,7 +532,7 @@ const Host = struct {
 
     /// Writes the step's composited frame, overlay and damage as PNGs.
     fn snapshot(self: *Host, dir: []const u8, number: usize, name: []const u8) !void {
-        const straight = try self.gpa.alloc(u8, pixel_count * 4);
+        const straight = try self.gpa.alloc(u8, @as(usize, self.width) * self.height * 4);
         defer self.gpa.free(straight);
 
         switch (self.mode) {
@@ -480,7 +545,7 @@ const Host = struct {
         }
 
         @memcpy(straight, self.composited);
-        for (self.damage.items) |r| outline(straight, r);
+        for (self.damage.items) |r| outline(straight, r, self.width, self.height);
         try self.write(dir, number, name, "-damage", straight);
     }
 
@@ -488,9 +553,77 @@ const Host = struct {
         var path_buffer: [512]u8 = undefined;
         const prefix: []const u8 = if (self.mode == .eink) "eink-" else "";
         const path = try std.fmt.bufPrint(&path_buffer, "{s}/{s}{d:0>2}-{s}{s}.png", .{ dir, prefix, number, name, suffix });
-        const encoded = try png.encode(self.gpa, rgba, width, height, width * 4);
+        const encoded = try png.encode(self.gpa, rgba, self.width, self.height, self.width * 4);
         defer self.gpa.free(encoded);
         try Io.Dir.cwd().writeFile(self.io, .{ .sub_path = path, .data = encoded });
+    }
+
+    /// Input work is attributed to the next presented update.
+    fn traceMouse(self: *Host, event: app.MouseEvent) !bool {
+        if (!measuring) return self.runtime.mouse(event);
+        const started = Io.Clock.awake.now(self.io);
+        defer self.trace.input_ns += Trace.elapsed(self.io, started);
+        return try self.runtime.mouse(event);
+    }
+
+    fn traceKey(self: *Host, event: app.KeyEvent) !bool {
+        if (!measuring) return self.runtime.key(event);
+        const started = Io.Clock.awake.now(self.io);
+        defer self.trace.input_ns += Trace.elapsed(self.io, started);
+        return try self.runtime.key(event);
+    }
+
+    // Allocation/backbuffer preparation is measured separately from the update.
+    fn traceResize(self: *Host, w: u32, h: u32) !void {
+        const started = std.Io.Clock.awake.now(self.io);
+        const count = @as(usize, w) * h;
+        const bytes = self.mode.pixelFormat().bytesPerPixel();
+        const overlay = try self.gpa.alignedAlloc(u8, .@"4", count * bytes);
+        errdefer self.gpa.free(overlay);
+        const background = try self.gpa.alloc(u8, count * 4);
+        errdefer self.gpa.free(background);
+        const composited = try self.gpa.alloc(u8, count * 4);
+        errdefer self.gpa.free(composited);
+        const full_overlay = try self.gpa.alignedAlloc(u8, .@"4", count * bytes);
+        errdefer self.gpa.free(full_overlay);
+        const full_composited = try self.gpa.alloc(u8, count * 4);
+        self.gpa.free(self.overlay);
+        self.gpa.free(self.background);
+        self.gpa.free(self.composited);
+        self.gpa.free(self.full_overlay);
+        self.gpa.free(self.full_composited);
+        self.overlay = overlay;
+        self.background = background;
+        self.composited = composited;
+        self.full_overlay = full_overlay;
+        self.full_composited = full_composited;
+        self.width = w;
+        self.height = h;
+        paintBackground(self.background, w, h);
+        self.damage.clearRetainingCapacity();
+        self.runtime.core.dirty = true;
+        self.trace.resize_ns = Trace.elapsed(self.io, started);
+    }
+
+    fn traceWorkloads(self: *Host) !void {
+        // The script enables the switch/spinner. Tick the fake animation clock.
+        self.trace.step = "animation";
+        for (0..30) |_| {
+            self.now = self.now.addDuration(.fromMilliseconds(16));
+            var report: Report = .{};
+            try self.frames(&report);
+            try self.check();
+        }
+        // Exercise real viewport/backbuffer changes, preserving runtime state.
+        self.trace.step = "resize";
+        for (0..3) |_| {
+            for ([_][2]u32{ .{ 640, 560 }, .{ 960, 800 }, .{ 800, 700 } }) |size| {
+                try self.traceResize(size[0], size[1]);
+                var report: Report = .{};
+                try self.frames(&report);
+                try self.check();
+            }
+        }
     }
 
     /// Times full redraws, and redraws of the damage a hover makes.
@@ -508,8 +641,8 @@ const Host = struct {
         var partial: [rounds]u64 = undefined;
         var area: usize = 0;
         for (&partial, 0..) |*t, n| {
-            _ = try self.runtime.mouse(.{ .position = if (n % 2 == 0) button else .init(780, 30) });
-            _ = try self.runtime.frame(Hybrid, self.mode.props(), viewport, self.now);
+            _ = try self.traceMouse(.{ .position = if (n % 2 == 0) button else .init(780, 30) });
+            _ = try self.runtime.frame(Hybrid, self.mode.props(), self.viewport(), self.now);
             const regions = try self.runtime.damage();
             area = 0;
             for (regions) |r| area += @intFromFloat(r.w * r.h);
@@ -518,24 +651,31 @@ const Host = struct {
             t.* = timer.lap();
         }
 
+        if (measuring) self.runtime.core.timings.reset();
         var frame_times: [rounds]u64 = undefined;
         for (&frame_times) |*t| {
             var timer = Timer.start(self.io);
-            _ = try self.runtime.frame(Hybrid, self.mode.props(), viewport, self.now);
+            _ = try self.runtime.frame(Hybrid, self.mode.props(), self.viewport(), self.now);
             t.* = timer.lap();
         }
 
         try out.print("\nbench ({s}, {t}, median of {d}):\n", .{ renderer_name, self.mode, rounds });
         try out.print("  layout and views, one frame:      {d:>7}us\n", .{median(&frame_times)});
-        try out.print("  render the whole {d}x{d} frame:   {d:>7}us\n", .{ width, height, median(&full) });
+        try out.print("  render the whole {d}x{d} frame:   {d:>7}us\n", .{ self.width, self.height, median(&full) });
         try out.print("  render a hover's damage ({d} px):  {d:>7}us\n", .{ area, median(&partial) });
+        if (measuring) {
+            inline for (@typeInfo(app.PhaseTimings.Phase).@"enum".field_names) |name| {
+                const sample = self.runtime.core.timings.get(@field(app.PhaseTimings.Phase, name));
+                if (sample.calls > 0) try out.print("  phase {s}: {d} ns total, {d} calls, {d} ns mean\n", .{ name, sample.total_ns, sample.calls, sample.total_ns / sample.calls });
+            }
+        }
     }
 
     /// Composites the premultiplied `overlay` over the opaque background
     /// into `out` within `region` (`out = overlay + background * (1 -
     /// alpha)`), or expands the gray panel to RGB.
     fn composite(self: *const Host, out: []u8, overlay: []const u8, region: Rect) void {
-        const span = Span.of(region);
+        const span = Span.of(region, self.viewport());
         if (span.isEmpty()) return;
         switch (self.mode) {
             inline else => |mode| self.compositeAs(mode, out, overlay, span),
@@ -545,7 +685,7 @@ const Host = struct {
     /// `composite` for one mode, so there is no branch per pixel.
     fn compositeAs(self: *const Host, comptime mode: Mode, out: []u8, overlay: []const u8, span: Span) void {
         for (span.y0..span.y1) |y| for (span.x0..span.x1) |x| {
-            const i = (y * width + x) * 4;
+            const i = (y * self.width + x) * 4;
             switch (mode) {
                 .overlay => {
                     const a: u32 = overlay[i + 3];
@@ -553,7 +693,7 @@ const Host = struct {
                     out[i + 3] = 255;
                 },
                 .eink => {
-                    const g = overlay[y * width + x];
+                    const g = overlay[y * self.width + x];
                     out[i..][0..4].* = .{ g, g, g, 255 };
                 },
             }
@@ -569,7 +709,7 @@ const Span = struct {
     x1: usize,
     y1: usize,
 
-    fn of(region: Rect) Span {
+    fn of(region: Rect, viewport: Vec2) Span {
         return .{
             .x0 = @intFromFloat(std.math.clamp(region.x, 0, viewport.x)),
             .y0 = @intFromFloat(std.math.clamp(region.y, 0, viewport.y)),
@@ -606,9 +746,9 @@ const Timer = struct {
 
 /// A stand-in for a remote screen or a game: soft diagonal bands of color,
 /// and a grid, opaque.
-fn paintBackground(rgba: []u8) void {
-    for (0..height) |y| for (0..width) |x| {
-        const p = rgba[(y * width + x) * 4 ..][0..4];
+fn paintBackground(rgba: []u8, w: u32, h: u32) void {
+    for (0..h) |y| for (0..w) |x| {
+        const p = rgba[(y * w + x) * 4 ..][0..4];
         const fx: f32 = @floatFromInt(x);
         const fy: f32 = @floatFromInt(y);
         const band = (@sin((fx + fy) / 90) + 1) / 2;
@@ -623,7 +763,7 @@ fn paintBackground(rgba: []u8) void {
 
 /// Straight alpha from premultiplied, for PNG.
 fn unpremultiply(out: []u8, premultiplied: []const u8) void {
-    for (0..pixel_count) |n| {
+    for (0..premultiplied.len / 4) |n| {
         const p = premultiplied[n * 4 ..][0..4];
         const a: u32 = p[3];
         out[n * 4 ..][0..4].* = if (a == 0) .{ 0, 0, 0, 0 } else .{
@@ -638,12 +778,12 @@ fn unpremultiply(out: []u8, premultiplied: []const u8) void {
 const pixel_count = width * height;
 
 /// Outlines `region` in red, two pixels wide.
-fn outline(rgba: []u8, region: Rect) void {
-    const span = Span.of(region);
+fn outline(rgba: []u8, region: Rect, w: u32, h: u32) void {
+    const span = Span.of(region, .init(@floatFromInt(w), @floatFromInt(h)));
     if (span.isEmpty()) return;
     for (span.y0..span.y1) |y| for (span.x0..span.x1) |x| {
         if (x - span.x0 >= 2 and span.x1 - x > 2 and y - span.y0 >= 2 and span.y1 - y > 2) continue;
-        rgba[(y * width + x) * 4 ..][0..4].* = .{ 230, 30, 30, 255 };
+        rgba[(y * w + x) * 4 ..][0..4].* = .{ 230, 30, 30, 255 };
     };
 }
 
@@ -702,4 +842,56 @@ test "quiet suppresses the per-step report" {
     try writeStep(&out, false, step, report, .{ .nanoseconds = 0 });
     try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "initial") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "when input comes") != null);
+}
+
+test "animation advances once per presentation rather than chasing its own deadline" {
+    var host: Host = undefined;
+    try host.init(std.testing.allocator, std.testing.io, .overlay);
+    defer host.deinit();
+    _ = try host.play(script[0]);
+    for (script) |step| {
+        if (std.mem.eql(u8, step.name, "switch")) _ = try host.play(step);
+    }
+    try std.testing.expect(host.runtime.rootState(Hybrid).?.switched);
+    for (0..3) |_| {
+        const before = host.now;
+        var report: Host.Report = .{};
+        try host.frames(&report);
+        try std.testing.expectEqual(before.addDuration(.fromMilliseconds(16)), host.now);
+        try std.testing.expect(host.runtime.nextFrame() != null);
+        try host.check();
+    }
+}
+
+test "measurement workloads cover resized buffers and retain exclusive phase accounting" {
+    if (!measuring) return;
+    var host: Host = undefined;
+    try host.init(std.testing.allocator, std.testing.io, .overlay);
+    defer host.deinit();
+    for (script) |step| {
+        _ = try host.play(step);
+        try host.check();
+    }
+    try host.traceWorkloads();
+    var animations: usize = 0;
+    var resizes: usize = 0;
+    for (host.trace.rows.items) |row| {
+        try std.testing.expect(row.frames > 0);
+        try std.testing.expect(row.total_ns >= row.frame_ns + row.damage_ns + row.render_ns + row.composite_ns + row.input_ns + row.resize_ns);
+        try std.testing.expect(row.frame_ns >= row.views_ns + row.layout_ns + row.commands_ns + row.reconcile_ns);
+        if (std.mem.eql(u8, row.step, "animation")) animations += 1;
+        if (std.mem.eql(u8, row.step, "resize")) resizes += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 30), animations);
+    try std.testing.expectEqual(@as(usize, 9), resizes);
+    try std.testing.expectEqual(width, host.width);
+    try std.testing.expectEqual(height, host.height);
+    // Buffer sizes follow the host and remain independent of another host.
+    var other: Host = undefined;
+    try other.init(std.testing.allocator, std.testing.io, .overlay);
+    defer other.deinit();
+    try host.traceResize(640, 560);
+    try std.testing.expectEqual(@as(usize, 640 * 560 * 4), host.overlay.len);
+    try std.testing.expectEqual(width, other.width);
+    try std.testing.expectEqual(@as(usize, width * height * 4), other.overlay.len);
 }

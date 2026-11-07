@@ -5,8 +5,8 @@
     .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .fabrum = .{
-            .url = "git+https://github.com/ssttevee/fabrum#bdaa521f6c229915be6ba9a629e89bd91d67093a",
-            .hash = "fabrum-0.0.0-qj9rbf6xGQB5lbkSE2hO1DLk9aTXjda6yebSl5RU-xRW",
+            .url = "git+https://github.com/ssttevee/fabrum#11c5bf5b35fb4aa22c1274ba34702ca277bd1df9",
+            .hash = "fabrum-0.0.0-qj9rbQ13JQDCgFYSBATaCswtTM9rwOcLRUn859DqVtFn",
         },
         // kitchen-none draws with one of these (-Drenderer).
         .fabrum_renderer_z2d = .{
@@ -24,5 +24,6 @@
         "build.zig",
         "build.zig.zon",
         "src",
+        "tools",
     },
 }

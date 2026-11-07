@@ -13,11 +13,8 @@ pub fn build(b: *std.Build) void {
     const platform = b.option(Platform, "platform", "fabrum's platform for the GUI and the interface's tests: native (the default: AppKit on macOS), gtk (GTK 4, through pkg-config) or none (drawn widgets)");
     const renderer = b.option(RendererChoice, "renderer", "What kitchen-none draws with: z2d (the default; pure Zig) or thorvg") orelse .z2d;
 
-    // Passed on only when given: fabrum's own default is `native`.
-    const fabrum_dep = if (platform) |p|
-        b.dependency("fabrum", .{ .target = target, .optimize = optimize, .platform = p })
-    else
-        b.dependency("fabrum", .{ .target = target, .optimize = optimize });
+    const phase_timings = b.option(bool, "phase_timings", "Compile fabrum CPU phase timing support (needed by measure/test-measure)") orelse false;
+    const fabrum_dep = fabrumDependency(b, target, optimize, platform, phase_timings);
     const fabrum_mod = fabrum_dep.module("fabrum");
 
     const test_step = b.step("test", "Run tests");
@@ -45,7 +42,14 @@ pub fn build(b: *std.Build) void {
         addGtk(b, target, optimize, fabrum_mod, test_step);
     }
 
-    addNone(b, target, optimize, renderer, test_step);
+    addNone(b, target, optimize, renderer, phase_timings, test_step);
+}
+
+fn fabrumDependency(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, platform: ?Platform, phase_timings: bool) *std.Build.Dependency {
+    return if (platform) |p|
+        b.dependency("fabrum", .{ .target = target, .optimize = optimize, .platform = p, .phase_timings = phase_timings })
+    else
+        b.dependency("fabrum", .{ .target = target, .optimize = optimize, .phase_timings = phase_timings });
 }
 
 /// The `kitchen` executable, its `run` step and its tests.
@@ -112,9 +116,10 @@ fn addNone(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     choice: RendererChoice,
+    phase_timings: bool,
     test_step: *std.Build.Step,
 ) void {
-    const fabrum_none = b.dependency("fabrum", .{ .target = target, .optimize = optimize, .platform = .none }).module("fabrum");
+    const fabrum_none = fabrumDependency(b, target, optimize, .none, phase_timings).module("fabrum");
     // the renderer packages don't depend on fabrum: they take the app's
     const renderer_mod = switch (choice) {
         .z2d => (b.lazyDependency("fabrum_renderer_z2d", .{ .target = target, .optimize = optimize }) orelse return).module("fabrum-renderer-z2d"),
@@ -124,6 +129,7 @@ fn addNone(
 
     const options = b.addOptions();
     options.addOption([]const u8, "renderer", @tagName(choice));
+    options.addOption(bool, "measure", false);
 
     const none_mod = b.createModule(.{
         .root_source_file = b.path("src/none.zig"),
@@ -143,6 +149,26 @@ fn addNone(
     const run = b.addRunArtifact(exe);
     run.addPassthruArgs();
     run_step.dependOn(&run.step);
+
+    const measure_options = b.addOptions();
+    measure_options.addOption([]const u8, "renderer", @tagName(choice));
+    measure_options.addOption(bool, "measure", true);
+    const measure_mod = b.createModule(.{
+        .root_source_file = b.path("src/none.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "fabrum", .module = fabrum_none },
+            .{ .name = "renderer", .module = renderer_mod },
+        },
+    });
+    measure_mod.addOptions("kitchen_options", measure_options);
+    const measured = b.addExecutable(.{ .name = "kitchen-measure", .root_module = measure_mod });
+    const run_measure = b.addRunArtifact(measured);
+    run_measure.addPassthruArgs();
+    b.step("measure", "Run matched CPU phase measurements and animation/resize workloads").dependOn(&run_measure.step);
+    const measured_tests = b.addTest(.{ .root_module = measure_mod });
+    b.step("test-measure", "Test the measurement host (requires fabrum phase timings)").dependOn(&b.addRunArtifact(measured_tests).step);
 
     const none_tests = b.addTest(.{ .root_module = none_mod });
     test_step.dependOn(&b.addRunArtifact(none_tests).step);

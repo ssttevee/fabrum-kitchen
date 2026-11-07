@@ -244,3 +244,49 @@ cached.
 | `src/png.zig` | A small PNG encoder for the snapshots (8-bit RGBA, compressed with `std.compress.flate`) |
 | `docs/input-design.md` | The design work the Kitchen drove, and what was built |
 | `src/fonts/Go-Regular.ttf`, `src/icons/` | The Go font (BSD license) and two Bootstrap icons (MIT license) |
+
+
+### CPU phase measurements
+
+The headless host includes an instrumented build and deterministic animation
+and resize workloads. Run against the pinned fabrum dependency:
+
+```sh
+zig build measure -Doptimize=ReleaseFast -Dphase_timings=true -- --overlay --quiet --bench
+zig build test-measure -Dplatform=none -Doptimize=ReleaseFast -Dphase_timings=true
+```
+
+Timing support is compiled out in normal builds. The measurement build requires
+`-Dphase_timings=true`; the Python runner passes it automatically. Add Zig's
+`--fork /path/to/fabrum` to test a local dependency without changing package pins.
+
+For repeated runs and machine-readable summaries:
+
+```sh
+python3 tools/measure.py --runs 3 --out /tmp/kitchen-timings
+```
+
+The runner only invokes `zig build measure` and summarizes its output. It does
+not copy projects, modify dependencies, or rewrite Zig source. Optional
+`--fabrum /path/to/fabrum` and `--renderer /path/to/renderer` use native dependency
+forks for local development.
+
+`frames.csv` records matched CPU work for each presented update: input, frame
+construction, damage, drawing, compositing, resize preparation, command count,
+viewport dimensions, summed damage area, and runtime rebuild count. A single
+update can contain multiple rebuilds while immediate state changes settle.
+`summary.json` contains workload counts, mean phase costs, and median/p95 totals.
+`metadata.json` records the exact command; `run-N.log` retains the raw output.
+Timing rows on stdout begin with `TRACE,` followed by CSV data.
+
+Use `--frame-policy batched` on the Python runner (or `--frame-policy batched`
+after `--` in the measurement build) to reproduce the old animation scheduling
+for A/B comparisons. The default advances simulated time once per presentation.
+The direct Zig flag spells the default policy `present_once`.
+
+These are CPU wall times in the software host, not GPU execution or native
+presentation latency. Frame time includes its view/layout/command/reconciliation
+subphases. Screenshot encoding, reference redraws, CSV buffering/output and
+idle time are excluded; input time is attributed to the next presented update.
+The workload retains the scripted damage checks and adds checks after animation
+and resize updates. Small workload groups do not provide stable tail estimates.
